@@ -1,0 +1,21 @@
+[
+  {"source": "WORKSTATION-09.CORP", "target": "BOB.USER", "relation": "HasSession"},
+  {"source": "BOB.USER", "target": "IT-DESK-SUPPORT", "relation": "MemberOf"},
+  {"source": "IT-DESK-SUPPORT", "target": "SRV-BACKUP.CORP", "relation": "AdminTo"},
+  {"source": "SRV-BACKUP.CORP", "target": "SVC-BACKUP", "relation": "HasSession"},
+  {"source": "SVC-BACKUP", "target": "TIER-1-ADMINS", "relation": "MemberOf"},
+  {"source": "TIER-1-ADMINS", "target": "JUMP-BOX.CORP", "relation": "AdminTo"},
+  {"source": "JUMP-BOX.CORP", "target": "ALICE.ADMIN", "relation": "HasSession"},
+  {"source": "ALICE.ADMIN", "target": "DOMAIN-ADMINS", "relation": "MemberOf"},
+  {"source": "DOMAIN-ADMINS", "target": "DC01.CORP", "relation": "AdminTo"},
+  {"source": "CONTRACTOR-01.CORP", "target": "CHARLIE.USER", "relation": "HasSession"},
+  {"source": "CHARLIE.USER", "target": "MARKETING-GROUP", "relation": "MemberOf"},
+  {"source": "MARKETING-GROUP", "target": "PRINT-SRV.CORP", "relation": "CanRDP"},
+  {"source": "PRINT-SRV.CORP", "target": "GUEST-WIFI", "relation": "ConnectedTo"},
+  {"source": "SALES-PC.CORP", "target": "DAVID.USER", "relation": "HasSession"},
+  {"source": "DAVID.USER", "target": "SALES-DEPT", "relation": "MemberOf"},
+  {"source": "SALES-DEPT", "target": "CRM-APP.CORP", "relation": "Accesses"},
+  {"source": "DEV-CLUSTER.CORP", "target": "JENNA.DEV", "relation": "HasSession"},
+  {"source": "JENNA.DEV", "target": "DEVELOPERS-GROUP", "relation": "MemberOf"},
+  {"source": "DEVELOPERS-GROUP", "target": "GIT-SRV.CORP", "relation": "AdminTo"}
+]

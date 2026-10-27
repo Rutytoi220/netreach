@@ -1,0 +1,32 @@
+# Virtual environment
+.venv/
+env/
+venv/
+
+# Python cache & build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+*.egg
+
+# Testing & Pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local experiment results & checkpoints
+results/
+*.pt.bak
+*.tmp
+
+# Un-ignore the bundled library weights asset
+!netreach/assets/weights.pt
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
