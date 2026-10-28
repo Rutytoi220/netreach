@@ -1,112 +1,89 @@
-# NetReach ⚡
+# NetReach
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.2%2B-ee4c2c.svg)](https://pytorch.org/)
-[![Parameters](https://img.shields.io/badge/Parameters-501K-brightgreen.svg)](#parameter-budget)
-[![Tests](https://img.shields.io/badge/Tests-100%25%20Passing-brightgreen.svg)](tests/)
+A lightweight PyTorch model for exploring how attackers could move through a network.
 
-**NetReach** is a fast, lightweight neural network engine for deep attack path reachability and lateral movement analysis in network security graphs, powered by test-time recurrent latent scaling.
+NetReach looks at a network's security graph and estimates whether an attacker can get from one machine to another, even when the path is pretty long. It uses a recurrent neural network that can do more computation at inference time, rather than relying on a fixed number of graph-processing steps.
 
-Instead of relying solely on heavy graph database queries or static fixed-depth Graph Neural Networks, NetReach maintains a per-node latent tensor that unrolls dynamically across test-time recurrent steps $T$. By allocating more latent compute steps at inference time ($T \in [5, 20]$), NetReach discovers multi-hop lateral movement chains across enterprise security graphs (Active Directory, BloodHound, Cloud IAM) that standard feedforward models miss.
+The idea is simple: **give the model more steps to think, and see if it can find longer paths.**
 
----
+## What's the idea?
 
-## Architecture Overview
+Most graph neural networks process information for a fixed number of layers. That works fine for nearby nodes, but longer paths can become difficult to detect.
 
-```
-                      ┌────────────────────────────────────────┐
-                      │    Input Graph & Query (src, dst)      │
-                      └──────────────────┬─────────────────────┘
-                                         ▼
-                      ┌────────────────────────────────────────┐
-                      │    Initial Projection: H_0 in R^{Nxd}  │
-                      └──────────┬─────────────────────────────┘
-                                 │
-                 ┌───────────────┴─────────────────────────┐
-                 │                                         │ (Persistent Source Anchor)
-                 │   ┌─────────────────────────────────┐   │
-                 └──►│ Vectorized Edge Message Passing │◄──┘
-                     │  - Mean: bmm(A_t, W_msg * H_t)  │
-                     │  - Max:  scatter_reduce(amax)   │
-                     └────────────────┬────────────────┘
-                                      ▼
-                     ┌─────────────────────────────────┐
-                     │ GRU-Style Highway Gating        │
-                     │  z_t = σ(Linear([H_t, msg, H_0])│
-                     │  H~_t = GELU(MLP([H_t, msg, H_0]│
-                     └────────────────┬────────────────┘
-                                      ▼
-                     ┌─────────────────────────────────┐
-                     │ Residual Latent Step & RMSNorm  │
-                     │  H_{t+1} = Norm((1-z)H + z*H~)  │
-                     └────────────────┬────────────────┘
-                                      │
-                                      ▼
-                         Loop for T = 5, 10, 15, 20
-                                      │
-                                      ▼
-                     ┌─────────────────────────────────┐
-                     │  Readout Head: [h_src, h_dst]   │
-                     │    Reachability Probability     │
-                     └─────────────────────────────────┘
-```
+NetReach takes a different approach. It keeps updating a hidden representation of the graph over multiple steps, with a few tricks to stop useful information from getting lost along the way.
 
-### Core Algorithmic Breakthroughs
-1. **Gated Highway Recurrence:** Replaces naive residual updates with GRU-style gating, eliminating latent over-smoothing.
-2. **Persistent Source Anchor:** Re-injects the initial query representation $H_0$ at every recurrent step, preventing query amnesia over 20+ hops.
-3. **Step-Invariant Training:** Trained with $T_{\text{train}} \sim \text{Uniform}(3, 8)$ to enforce contractive dynamics that generalize cleanly to $T_{\text{test}} \ge 20$.
-4. **Vectorized Fused Ops:** Eliminates 4D tensor expansions, utilizing fused `torch.bmm` and `torch.scatter_reduce` over edge index buffers ($O(B \cdot M \cdot d)$) for a 24x memory reduction.
+You can change the number of steps at inference time (`T = 5, 10, 15, 20`) without adding more model parameters.
 
----
+## How it works
 
-## Empirical Benchmark: Solving the Multi-Hop Wall
+At a high level, NetReach:
 
-Trained only on short paths ($H \in [3, 5]$) on single RTX 4060 GPU and evaluated on out-of-distribution graph diameters ($N=48$, $M=96$, balanced classes):
+1. Takes a graph and a source/target pair.
+2. Builds an initial representation of the graph.
+3. Passes information between connected nodes over several recurrent steps.
+4. Uses gating and residual connections to keep useful information around.
+5. Predicts how likely the target is to be reachable from the source.
 
-| Path Hops ($H$) | Split | Transformer (Fixed Depth=3) | GRU (Sequential) | NetReach ($T=5$) | NetReach ($T=10$) | NetReach ($T=15$) | NetReach ($T=20$) | Latent Cosine Sim | Diagnostic Status |
-| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **$H=3$** | In-Dist | 53.7% | 52.7% | 85.0% | 91.3% | 91.0% | **90.7%** | $0.12 \to 0.38$ | HEALTHY ✔ |
-| **$H=5$** | In-Dist | 51.7% | 56.3% | 82.0% | 91.0% | **92.7%** | 91.7% | $0.12 \to 0.37$ | HEALTHY ✔ |
-| **$H=8$** | **OOD** | 52.3% | 54.7% | 67.0% | 84.0% | 88.0% | **88.7%** | $0.11 \to 0.37$ | HEALTHY ✔ |
-| **$H=12$** | **OOD** | 53.0% | 49.3% | 54.0% | 60.0% | 69.0% | **75.0%** | $0.09 \to 0.36$ | HEALTHY ✔ |
-| **$H=16$** | **OOD** | 54.3% | 51.3% | 49.7% | 51.3% | 58.7% | **67.3%** | $0.09 \to 0.31$ | HEALTHY ✔ |
-| **$H=20$** | **OOD** | 44.7% | 49.3% | 45.7% | 48.7% | 52.3% | **55.7%** | $0.09 \to 0.31$ | HEALTHY ✔ |
+The implementation uses vectorized PyTorch operations to keep memory usage down.
 
-*Key Result:* Feedforward Transformers and sequential GRUs collapse to random guessing (~50%) beyond their receptive field. NetReach demonstrates **test-time compute scaling**: scaling $T_{\text{test}} \to 20$ yields **+21.0% on $H=12$** and **+17.6% on $H=16$** with zero parameter expansion.
+### A few things worth knowing
 
----
+- **Recurrent updates:** The model repeatedly updates node representations instead of stopping at a fixed graph depth.
+- **Source anchoring:** The original query representation is reused at every step, so the model doesn't lose track of the starting point.
+- **Variable inference depth:** Training uses different numbers of steps, while inference can use more.
+- **Efficient message passing:** Batched matrix multiplication and scatter operations avoid some unnecessarily large intermediate tensors.
 
-## Parameter Budget
+## Does it actually work?
 
-All three benchmark models are strictly parameter-matched:
+I tested NetReach against a Transformer and a GRU with roughly the same parameter budget.
 
-| Model | Parameters | Budget Compliance |
-| :--- | :---: | :---: |
-| **Baseline Transformer** | 501,185 | `[400k - 600k]` ✔ |
-| **Baseline GRU** | 501,017 | `[400k - 600k]` ✔ |
-| **NetReach (`ChallengerLatentNet`)** | **501,793** | `[400k - 600k]` ✔ |
+The models were trained on shorter paths of 3–5 hops, then evaluated on longer paths they hadn't been trained on.
 
----
+Here are some of the results:
+
+| Path length | NetReach, 5 steps | NetReach, 10 steps | NetReach, 20 steps |
+|---:|---:|---:|---:|
+| 3 hops | 85.0% | 91.3% | 90.7% |
+| 5 hops | 82.0% | 91.0% | 91.7% |
+| 8 hops | 67.0% | 84.0% | 88.7% |
+| 12 hops | 54.0% | 60.0% | 75.0% |
+| 16 hops | 49.7% | 51.3% | 67.3% |
+| 20 hops | 45.7% | 48.7% | 55.7% |
+
+The main takeaway: **more inference steps helped on longer paths**, especially at 12 and 16 hops. Performance still drops as paths get longer, so this definitely isn't a solved problem.
+
+These numbers come from the current benchmark setup, not real-world penetration tests. The results should be treated as experimental until they're validated on more realistic security graphs.
+
+### Parameter count
+
+All three models have around 501K parameters:
+
+| Model | Parameters |
+|---|---:|
+| Transformer baseline | 501,185 |
+| GRU baseline | 501,017 |
+| NetReach | 501,793 |
+
+That makes the comparison fairly close in terms of model size.
 
 ## Installation
 
+Clone the repo and install the package:
+
 ```bash
-git clone https://github.com/your-org/netreach.git
+git clone https://github.com/Rutytoi220/netreach.git
 cd netreach
 pip install -e .
 ```
 
-NetReach includes bundled pre-trained weights (`netreach/assets/weights.pt`) and operates out-of-the-box on both CUDA and pure CPU.
-
----
+NetReach includes pretrained weights and supports CUDA or CPU inference.
 
 ## Quickstart
 
-### 1. Command-Line Interface (CLI)
+### Run an audit
 
-#### Audit Lateral Movement Attack Path
-Audit whether an adversary at `WORKSTATION-09.CORP` can traverse an enterprise graph to compromise `DC01.CORP`:
+Check whether a machine can reach another machine through the example security graph:
+
 ```bash
 netreach audit \
   --graph examples/active_directory.json \
@@ -115,25 +92,29 @@ netreach audit \
   --depth 5 10 15 20
 ```
 
-#### JSON Output for Security Automation (SIEM/SOAR/CI)
+Want JSON output for another tool or script to consume?
+
 ```bash
-netreach audit --graph examples/active_directory.json --src WORKSTATION-09.CORP --dst DC01.CORP --json
+netreach audit \
+  --graph examples/active_directory.json \
+  --src WORKSTATION-09.CORP \
+  --dst DC01.CORP \
+  --json
 ```
 
-#### Run Automated Benchmark
+### Run the benchmark
+
 ```bash
 netreach benchmark --samples 50
 ```
 
-### 2. Python API
+### Use it from Python
 
 ```python
 from netreach import NetReachEngine
 
-# Automatically detects CUDA, gracefully falls back to CPU
 engine = NetReachEngine()
 
-# Audit lateral movement between endpoints
 result = engine.audit(
     graph_source="examples/active_directory.json",
     source="WORKSTATION-09.CORP",
@@ -141,43 +122,39 @@ result = engine.audit(
     depths=(5, 10, 15, 20),
 )
 
-print(f"Risk Tier: {result.risk_level}")
-print(f"Reachability Probabilities: {result.probabilities}")
-print(f"Discovered Lateral Chain: {result.ground_truth_path}")
+print(f"Risk level: {result.risk_level}")
+print(f"Probabilities: {result.probabilities}")
+print(f"Path: {result.ground_truth_path}")
 ```
 
----
+The engine automatically detects CUDA and falls back to CPU when needed.
 
-## Supported Graph Formats
+## Supported graph formats
 
-NetReach natively ingests security graphs from:
-- **JSON Edge Lists:** `[{"source": "u", "target": "v", "relation": "AdminTo"}]`
-- **BloodHound / Active Directory JSON**
-- **Graphviz DOT:** `.dot`, `.gv`
-- **GraphML:** `.graphml`
-- **NetworkX DiGraph** objects
+NetReach can work with:
 
----
+- JSON edge lists
+- BloodHound / Active Directory JSON
+- Graphviz DOT and GV files
+- GraphML
+- NetworkX directed graphs
 
-## Real-World Cybersecurity Use Cases
+## What could it be used for?
 
-1. **Active Directory Lateral Movement (BloodHound):**
-   Evaluate non-obvious multi-hop delegation chains (`MemberOf` $\to$ `AdminTo` $\to$ `HasSession` $\to$ `GenericAll`) across thousands of domain assets.
-2. **Cloud IAM Entitlement & Privilege Escalation:**
-   Uncover transitive role-assumption corridors in AWS IAM / Azure AD (`AssumeRole` $\to$ `PassRole` $\to$ `AttachUserPolicy`).
-3. **OT / IT Microsegmentation Auditing:**
-   Verify whether zero-trust network boundaries strictly isolate critical control networks from corporate workstations.
+Some possible use cases:
 
----
+- **Active Directory:** Explore multi-hop relationships between domain machines, users, groups, and permissions.
+- **Cloud IAM:** Study how permissions and role assumptions can create indirect access paths.
+- **Network segmentation:** Check whether supposedly isolated systems are connected through other parts of the graph.
 
-## Running Tests
+These are potential applications, not a claim that the model has already been validated for every environment.
+
+## Running the tests
 
 ```bash
 pytest tests/ -v
 ```
 
----
-
 ## License
 
-MIT License. See [LICENSE](LICENSE) for details.
+NetReach is licensed under the MIT License. See [LICENSE](LICENSE) for the details.
