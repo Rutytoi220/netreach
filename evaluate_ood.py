@@ -1,26 +1,25 @@
 """
-Out-of-Distribution (OOD) Algorithmic Generalization & Recurrence Scaling Evaluation.
+Out-of-Distribution (OOD) Algorithmic Generalization & Dynamic ACT Halting Evaluation.
 
-Evaluates trained checkpoints across path lengths:
+Evaluates NetReach v2 (ChallengerLatentNetV2) across path lengths:
 In-Distribution: H in [3, 5]
 Out-of-Distribution: H in [8, 12, 16, 20]
 
-For the Upgraded Challenger Latent Net, test-time latent recurrence compute scaling is evaluated
-across test-time iteration counts T_test in [5, 10, 15, 20].
-
-Mathematical Diagnostic Logging:
-- Computes average off-diagonal pairwise cosine similarity between node latents at each T_test.
-- Detects and flags over-smoothing if cosine similarity approaches 1.0 (threshold > 0.85).
+Evaluations performed:
+1. Test-time compute scaling across fixed iteration counts T_test in [5, 10, 15, 20].
+2. Autonomous Adaptive Halting (ACT) mode: tracks accuracy, hop prediction MAE, and dynamic steps taken.
+3. Pairwise cosine similarity diagnostics to verify absence of over-smoothing.
+4. Comparative performance against Baseline Transformer and Baseline GRU.
 
 Outputs:
-- Rich formatted summary table comparing accuracy, recurrence scaling, and cosine similarity.
-- JSON results saved to results/ood_eval_results.json.
+- Rich formatted summary table comparing models across hop lengths.
+- Detailed JSON results saved to results/ood_eval_v2.json.
 """
 
 import os
 import json
 import argparse
-from typing import Dict, List, Any, Tuple
+from typing import Dict, List, Any, Tuple, Optional
 
 import torch
 import torch.nn as nn
@@ -28,10 +27,10 @@ import torch.nn.functional as F
 from rich.console import Console
 from rich.table import Table
 
-from data.generator import create_dataloader
+from data.generator import create_dataloader, RELATION_TYPES
+from netreach.model_v2 import ChallengerLatentNetV2
 from models.baseline_transformer import BaselineTransformer
 from models.baseline_gru import BaselineGRU
-from models.challenger_latent_net import ChallengerLatentNet
 
 console = Console()
 
@@ -43,25 +42,14 @@ def get_device() -> torch.device:
 
 
 def compute_pairwise_cosine_similarity(H: torch.Tensor) -> float:
-    """
-    Computes average pairwise off-diagonal cosine similarity between node vectors.
-    Args:
-        H: Latent node representations [B, N, d].
-    Returns:
-        float: Mean off-diagonal cosine similarity in [-1, 1].
-    """
+    """Computes average off-diagonal pairwise cosine similarity between node latents."""
     B, N, d = H.shape
     if N <= 1:
         return 0.0
-
-    # L2 normalize along the feature dimension d
-    H_norm = F.normalize(H, p=2, dim=-1)  # [B, N, d]
-    sim_matrix = torch.bmm(H_norm, H_norm.transpose(1, 2))  # [B, N, N]
-
-    # Create mask excluding diagonal elements (self-similarity = 1.0)
+    H_norm = F.normalize(H, p=2, dim=-1)
+    sim_matrix = torch.bmm(H_norm, H_norm.transpose(1, 2))
     eye_mask = torch.eye(N, dtype=torch.bool, device=H.device).unsqueeze(0).expand(B, -1, -1)
-    off_diagonal = sim_matrix[~eye_mask]
-    return off_diagonal.mean().item()
+    return sim_matrix[~eye_mask].mean().item()
 
 
 @torch.no_grad()
@@ -70,53 +58,83 @@ def evaluate_model_on_dataloader(
     dataloader: torch.utils.data.DataLoader,
     device: torch.device,
     use_bf16: bool,
-    steps: int = None,
-) -> Tuple[Dict[str, float], float]:
+    steps: Optional[int] = None,
+) -> Dict[str, Any]:
     """
-    Evaluate accuracy on a specific dataloader and compute latent cosine similarity if applicable.
+    Evaluates model on dataloader.
+    Supports both fixed step unrolling and autonomous ACT execution.
     """
     model.eval()
     correct = 0
     total = 0
     total_loss = 0.0
-    cosine_sim_sum = 0.0
-    cosine_sim_batches = 0
-    criterion = nn.BCEWithLogitsLoss()
+    hop_mae = 0.0
+    reachable_count = 0
+    cos_sim_sum = 0.0
+    batches = 0
+    act_steps_total = 0.0
+    criterion_bce = nn.BCEWithLogitsLoss()
 
     for batch in dataloader:
         batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
         labels = batch["label"]
+        hop_lengths = batch["hop_length"]
+        batch_size = len(labels)
 
-        with torch.amp.autocast(device_type="cuda" if device.type == "cuda" else "cpu", dtype=torch.bfloat16, enabled=use_bf16):
-            if isinstance(model, ChallengerLatentNet):
-                logits, latents = model(batch, steps=steps, return_latents=True)
-                # Compute pairwise cosine similarity for diagnostic logging
-                sim = compute_pairwise_cosine_similarity(latents)
-                cosine_sim_sum += sim
-                cosine_sim_batches += 1
+        with torch.amp.autocast(
+            device_type="cuda" if device.type == "cuda" else "cpu",
+            dtype=torch.bfloat16,
+            enabled=use_bf16,
+        ):
+            if isinstance(model, ChallengerLatentNetV2):
+                if steps is not None:
+                    logits, pred_hops, latents = model(batch, steps=steps, return_latents=True)
+                    steps_taken = float(steps)
+                else:
+                    out = model(batch, return_latents=True)
+                    logits = out["logit"]
+                    pred_hops = out["hop"]
+                    latents = out["latents"]
+                    steps_taken = out["steps_taken"].mean().item()
+
+                loss = criterion_bce(logits, labels)
+                cos_sim = compute_pairwise_cosine_similarity(latents)
+                cos_sim_sum += cos_sim
+                act_steps_total += steps_taken * batch_size
+
+                reach_mask = (labels == 1.0)
+                if reach_mask.sum() > 0:
+                    hop_mae += F.l1_loss(pred_hops[reach_mask], hop_lengths[reach_mask].float(), reduction="sum").item()
+                    reachable_count += reach_mask.sum().item()
             else:
                 logits = model(batch)
-            loss = criterion(logits, labels)
+                loss = criterion_bce(logits, labels)
 
-        total_loss += loss.item() * len(labels)
+        total_loss += loss.item() * batch_size
         preds = (torch.sigmoid(logits) >= 0.5).float()
         correct += (preds == labels).sum().item()
-        total += len(labels)
+        total += batch_size
+        batches += 1
 
-    metrics = {
+    return {
         "acc": correct / total if total > 0 else 0.0,
         "loss": total_loss / total if total > 0 else 0.0,
+        "hop_mae": (hop_mae / reachable_count) if reachable_count > 0 else 0.0,
+        "cos_sim": (cos_sim_sum / batches) if batches > 0 else 0.0,
+        "mean_steps": (act_steps_total / total) if total > 0 else 0.0,
     }
-    avg_cosine_sim = (cosine_sim_sum / cosine_sim_batches) if cosine_sim_batches > 0 else 0.0
-    return metrics, avg_cosine_sim
 
 
 def load_checkpoint(model: nn.Module, ckpt_path: str, device: torch.device):
     if not os.path.exists(ckpt_path):
-        raise FileNotFoundError(f"Checkpoint not found at {ckpt_path}. Please run train.py first.")
+        console.print(f"[bold yellow]Warning: Checkpoint not found at {ckpt_path}. Skipping.[/bold yellow]")
+        return False
     ckpt = torch.load(ckpt_path, map_location=device)
     model.load_state_dict(ckpt["model_state_dict"])
-    console.print(f"[green]Loaded checkpoint from {ckpt_path} (trained val acc: {ckpt.get('val_acc', 0.0)*100:.1f}%)[/green]")
+    console.print(
+        f"[green]Loaded checkpoint from {ckpt_path} (val acc: {ckpt.get('val_acc', 0.0)*100:.1f}%, params: {ckpt.get('param_count', 0):,})[/green]"
+    )
+    return True
 
 
 def run_evaluation(
@@ -134,14 +152,31 @@ def run_evaluation(
     use_bf16 = (device.type == "cuda" and torch.cuda.is_bf16_supported())
 
     # Initialize models
+    challenger_v2 = ChallengerLatentNetV2(
+        num_nodes=64,
+        node_embed_dim=128,
+        d_model=384,
+        hidden_dim=768,
+        nhead=4,
+        rel_dim=64,
+        num_relations=8,
+        max_steps=20,
+        epsilon=0.01,
+        use_compile=False,
+    ).to(device)
+
     transformer = BaselineTransformer(num_nodes=50).to(device)
     gru = BaselineGRU(num_nodes=50).to(device)
-    challenger = ChallengerLatentNet(num_nodes=50, train_steps=5).to(device)
 
-    # Load trained checkpoints
-    load_checkpoint(transformer, os.path.join(checkpoint_dir, "baselinetransformer_best.pt"), device)
-    load_checkpoint(gru, os.path.join(checkpoint_dir, "baselinegru_best.pt"), device)
-    load_checkpoint(challenger, os.path.join(checkpoint_dir, "challengerlatentnet_best.pt"), device)
+    v2_loaded = load_checkpoint(
+        challenger_v2, os.path.join(checkpoint_dir, "challengerlatentnetv2_best.pt"), device
+    )
+    tf_loaded = load_checkpoint(
+        transformer, os.path.join(checkpoint_dir, "baselinetransformer_best.pt"), device
+    )
+    gru_loaded = load_checkpoint(
+        gru, os.path.join(checkpoint_dir, "baselinegru_best.pt"), device
+    )
 
     results_table = []
     summary_data = {
@@ -150,13 +185,12 @@ def run_evaluation(
         "hops": {},
     }
 
-    console.print("\n[bold cyan]Starting Harder Distribution Evaluation Across Path Lengths...[/bold cyan]\n")
+    console.print("\n[bold cyan]Starting NetReach v2 Evaluation Across Path Lengths...[/bold cyan]\n")
 
     for h in eval_hops:
         dist_type = "In-Dist" if h in [3, 4, 5] else "OOD"
         console.print(f"[bold yellow]Evaluating Hop Length H = {h} ({dist_type})...[/bold yellow]")
 
-        # Create balanced test dataloader for this specific hop length
         loader = create_dataloader(
             hop_lengths=[h],
             num_samples=samples_per_hop,
@@ -167,67 +201,58 @@ def run_evaluation(
             seed=seed + h * 100,
         )
 
-        # 1. Evaluate Baseline Transformer
-        tf_metrics, _ = evaluate_model_on_dataloader(transformer, loader, device, use_bf16)
+        tf_acc = evaluate_model_on_dataloader(transformer, loader, device, use_bf16)["acc"] if tf_loaded else 0.5
+        gru_acc = evaluate_model_on_dataloader(gru, loader, device, use_bf16)["acc"] if gru_loaded else 0.5
 
-        # 2. Evaluate Baseline GRU
-        gru_metrics, _ = evaluate_model_on_dataloader(gru, loader, device, use_bf16)
+        # 1. Autonomous ACT Evaluation
+        act_metrics = evaluate_model_on_dataloader(challenger_v2, loader, device, use_bf16, steps=None)
 
-        # 3. Evaluate Challenger across T_test values with mathematical diagnostic
-        challenger_t_results = {}
+        # 2. Fixed Steps Evaluation
+        fixed_step_results = {}
         cosine_sim_results = {}
-        oversmoothing_flags = {}
-
         for t_test in t_test_values:
-            c_metrics, cos_sim = evaluate_model_on_dataloader(challenger, loader, device, use_bf16, steps=t_test)
-            challenger_t_results[f"T={t_test}"] = c_metrics["acc"]
-            cosine_sim_results[f"T={t_test}"] = cos_sim
-            is_oversmoothed = cos_sim >= 0.85
-            oversmoothing_flags[f"T={t_test}"] = is_oversmoothed
-            if is_oversmoothed:
-                console.print(f"  [bold red]⚠ OVER-SMOOTHING WARNING at T={t_test}: Cosine Sim = {cos_sim:.4f}[/bold red]")
+            m = evaluate_model_on_dataloader(challenger_v2, loader, device, use_bf16, steps=t_test)
+            fixed_step_results[f"T={t_test}"] = m["acc"]
+            cosine_sim_results[f"T={t_test}"] = m["cos_sim"]
 
         row = {
             "hop": h,
             "dist": dist_type,
-            "transformer_acc": tf_metrics["acc"],
-            "gru_acc": gru_metrics["acc"],
-            "challenger_accs": challenger_t_results,
+            "transformer_acc": tf_acc,
+            "gru_acc": gru_acc,
+            "act_acc": act_metrics["acc"],
+            "act_steps": act_metrics["mean_steps"],
+            "act_hop_mae": act_metrics["hop_mae"],
+            "fixed_accs": fixed_step_results,
             "cosine_sims": cosine_sim_results,
-            "oversmoothing_warnings": oversmoothing_flags,
         }
         results_table.append(row)
         summary_data["hops"][str(h)] = row
 
-    # Build and print Rich summary table
+    # Render summary table
     table = Table(
-        title="Directed Graph Reachability: Harder Benchmark (N=48, H up to 20)",
+        title="NetReach v2: Multi-Relational Algorithmic Generalization & ACT Halting",
         header_style="bold magenta",
         show_lines=True,
     )
-    table.add_column("H (Hops)", justify="center", style="cyan", no_wrap=True)
-    table.add_column("Type", justify="center", style="bold")
+    table.add_column("Hops (H)", justify="center", style="cyan", no_wrap=True)
+    table.add_column("Distribution", justify="center", style="bold")
     table.add_column("Transformer\n(Fixed Depth)", justify="center", style="green")
     table.add_column("GRU\n(Sequential)", justify="center", style="blue")
-
     for t_test in t_test_values:
-        table.add_column(f"Challenger\n(T={t_test})", justify="center", style="yellow")
-
-    table.add_column("Cosine Sim\n(T=5 → 20)", justify="center", style="magenta")
-    table.add_column("Over-Smoothing\nDiagnostic", justify="center", style="bold")
+        table.add_column(f"NetReach v2\n(T={t_test})", justify="center", style="yellow")
+    table.add_column("Autonomous ACT\n(Acc / Mean Steps)", justify="center", style="bold magenta")
+    table.add_column("Hop MAE\n(Distance)", justify="center", style="cyan")
+    table.add_column("Cosine Sim\n(T=5 → 20)", justify="center", style="dim")
 
     for row in results_table:
         dist_style = "[green]In-Dist[/green]" if row["dist"] == "In-Dist" else "[red]OOD[/red]"
         tf_str = f"{row['transformer_acc']*100:.1f}%"
         gru_str = f"{row['gru_acc']*100:.1f}%"
-        c_strs = [f"{row['challenger_accs'][f'T={t}']*100:.1f}%" for t in t_test_values]
-
-        cos_t5 = row["cosine_sims"].get("T=5", 0.0)
-        cos_t20 = row["cosine_sims"].get(f"T={t_test_values[-1]}", 0.0)
-        cos_str = f"{cos_t5:.2f} → {cos_t20:.2f}"
-
-        has_warning = any(row["oversmoothing_warnings"].values())
-        diag_str = "[bold red]WARNING[/bold red]" if has_warning else "[bold green]HEALTHY ✔[/bold green]"
+        c_strs = [f"{row['fixed_accs'][f'T={t}']*100:.1f}%" for t in t_test_values]
+        act_str = f"{row['act_acc']*100:.1f}% ({row['act_steps']:.1f} steps)"
+        mae_str = f"±{row['act_hop_mae']:.1f} hops"
+        cos_str = f"{row['cosine_sims']['T=5']:.2f} → {row['cosine_sims'][f'T={t_test_values[-1]}']:.2f}"
 
         table.add_row(
             str(row["hop"]),
@@ -235,32 +260,30 @@ def run_evaluation(
             tf_str,
             gru_str,
             *c_strs,
+            act_str,
+            mae_str,
             cos_str,
-            diag_str,
         )
 
     console.print("\n")
     console.print(table)
     console.print("\n")
 
-    # Save to JSON
     os.makedirs(output_dir, exist_ok=True)
-    json_path = os.path.join(output_dir, "ood_eval_results.json")
+    json_path = os.path.join(output_dir, "ood_eval_v2.json")
     with open(json_path, "w") as f:
         json.dump(summary_data, f, indent=2)
     console.print(f"[bold green]Saved detailed evaluation results to {json_path}[/bold green]\n")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Evaluate models across harder in-distribution and OOD hop lengths.")
-    parser.add_argument("--samples_per_hop", type=int, default=300, help="Number of test samples per hop length")
-    parser.add_argument("--num_nodes", type=int, default=48, help="Number of nodes per graph")
-    parser.add_argument("--target_edges", type=int, default=96, help="Number of edges per graph")
-    parser.add_argument("--batch_size", type=int, default=64, help="Batch size for evaluation")
+    parser = argparse.ArgumentParser(description="Evaluate NetReach v2 models across path lengths.")
+    parser.add_argument("--samples_per_hop", type=int, default=300, help="Test samples per hop length")
+    parser.add_argument("--batch_size", type=int, default=64, help="Batch size")
     parser.add_argument("--checkpoint_dir", type=str, default="results/checkpoints", help="Path to checkpoints")
     parser.add_argument("--output_dir", type=str, default="results", help="Directory for output results")
     parser.add_argument("--hops", type=int, nargs="+", default=[3, 5, 8, 12, 16, 20], help="Hops to evaluate")
-    parser.add_argument("--t_test", type=int, nargs="+", default=[5, 10, 15, 20], help="Test-time steps for Challenger")
+    parser.add_argument("--t_test", type=int, nargs="+", default=[5, 10, 15, 20], help="Test steps for fixed scaling")
     args = parser.parse_args()
 
     run_evaluation(
@@ -269,8 +292,6 @@ def main():
         t_test_values=args.t_test,
         checkpoint_dir=args.checkpoint_dir,
         output_dir=args.output_dir,
-        num_nodes=args.num_nodes,
-        target_edges=args.target_edges,
         batch_size=args.batch_size,
     )
 

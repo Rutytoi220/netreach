@@ -1,22 +1,35 @@
 """
-Data generator for Directed Graph Reachability with Harder Benchmark Distribution.
+Data generator for Directed Graph Reachability with Multi-Relational Edge Modeling.
 
 Features:
 - Exact shortest-path controls using NetworkX.
+- Supports 6 directed relation types:
+  AdminTo, MemberOf, HasSession, AllowedToDelegate, OpenPort, SubnetRoute.
 - Supports expanded graph sizes: default N = 48 nodes, target_edges = 96.
 - Training distribution: Path lengths H in [3, 5].
-- Harder evaluation distribution: H in [3, 5, 8, 12, 16, 20].
+- Evaluation distribution: In-distribution (H in [3, 5]) and Out-of-Distribution (H in [6, 8, 10, 12, 16, 20]).
 - Perfectly balanced classes (50% reachable, 50% unreachable).
 - Unreachable pairs matched in node count (N = 48) and edge density (target_edges = 96)
   to prevent structural cheating.
 - Node ID permutation and edge order shuffling to prevent positional shortcut learning.
 """
 
-from typing import List, Tuple, Dict, Optional
+from typing import List, Tuple, Dict, Optional, Union
 import random
 import networkx as nx
 import torch
 from torch.utils.data import Dataset, DataLoader
+
+RELATION_TYPES = [
+    "AdminTo",
+    "MemberOf",
+    "HasSession",
+    "AllowedToDelegate",
+    "OpenPort",
+    "SubnetRoute",
+]
+RELATION_TO_ID = {name: i for i, name in enumerate(RELATION_TYPES)}
+NUM_RELATIONS = len(RELATION_TYPES)
 
 
 def generate_graph_sample(
@@ -25,9 +38,9 @@ def generate_graph_sample(
     num_nodes: int = 48,
     target_edges: int = 96,
     rng: Optional[random.Random] = None,
-) -> Tuple[List[Tuple[int, int]], int, int, int, int]:
+) -> Tuple[List[Tuple[int, int, int]], int, int, int, int]:
     """
-    Generate a single directed graph reachability sample.
+    Generate a single heterogeneous directed graph reachability sample.
 
     Args:
         H: Target shortest path length between src and dst.
@@ -37,7 +50,7 @@ def generate_graph_sample(
         rng: Optional random.Random instance for reproducibility.
 
     Returns:
-        edges: List of directed (u, v) edge pairs.
+        edges: List of directed (u, v, rel_id) edge tuples.
         src: Source node ID.
         dst: Destination node ID.
         label: 1 if reachable, 0 if unreachable.
@@ -56,9 +69,10 @@ def generate_graph_sample(
         path = all_nodes[: H + 1]
         src, dst = path[0], path[-1]
         for i in range(H):
-            G.add_edge(path[i], path[i + 1])
+            rel = rng.randint(0, NUM_RELATIONS - 1)
+            G.add_edge(path[i], path[i + 1], rel=rel)
 
-        # 2. Add random noise edges without creating any shortcut < H
+        # 2. Add random noise edges with relation assignments without creating any shortcut < H
         candidates = [
             (u, v)
             for u in range(num_nodes)
@@ -69,7 +83,8 @@ def generate_graph_sample(
         for u, v in candidates:
             if G.number_of_edges() >= target_edges:
                 break
-            G.add_edge(u, v)
+            rel = rng.randint(0, NUM_RELATIONS - 1)
+            G.add_edge(u, v, rel=rel)
             try:
                 spl = nx.shortest_path_length(G, src, dst)
                 if spl < H:
@@ -97,14 +112,16 @@ def generate_graph_sample(
         path1 = S1[: h_s1 + 1]
         src = path1[0]
         for i in range(h_s1):
-            G.add_edge(path1[i], path1[i + 1])
+            rel = rng.randint(0, NUM_RELATIONS - 1)
+            G.add_edge(path1[i], path1[i + 1], rel=rel)
 
         # Plant a path of length H in S2 ending at dst
         h_s2 = min(H, len(S2) - 1)
         path2 = S2[: h_s2 + 1]
         dst = path2[-1]
         for i in range(h_s2):
-            G.add_edge(path2[i], path2[i + 1])
+            rel = rng.randint(0, NUM_RELATIONS - 1)
+            G.add_edge(path2[i], path2[i + 1], rel=rel)
 
         # Add edges within S1, within S2, and directed cross-edges S2 -> S1
         # Strictly NO edges S1 -> S2 are permitted, guaranteeing no path from src to dst.
@@ -126,7 +143,8 @@ def generate_graph_sample(
         for u, v in candidates:
             if G.number_of_edges() >= target_edges:
                 break
-            G.add_edge(u, v)
+            rel = rng.randint(0, NUM_RELATIONS - 1)
+            G.add_edge(u, v, rel=rel)
 
         assert not nx.has_path(
             G, src, dst
@@ -140,7 +158,10 @@ def generate_graph_sample(
     perm_map = {old: new for old, new in enumerate(perm)}
     new_src = perm_map[src]
     new_dst = perm_map[dst]
-    edges = [(perm_map[u], perm_map[v]) for u, v in G.edges()]
+    edges = [
+        (perm_map[u], perm_map[v], G[u][v].get("rel", rng.randint(0, NUM_RELATIONS - 1)))
+        for u, v in G.edges()
+    ]
 
     # 2. Randomly shuffle edge sequence order
     rng.shuffle(edges)
@@ -150,7 +171,7 @@ def generate_graph_sample(
 
 class ReachabilityDataset(Dataset):
     """
-    Dataset for directed graph reachability with controlled path lengths.
+    Dataset for directed graph reachability with controlled path lengths and relations.
     """
 
     def __init__(
@@ -198,7 +219,7 @@ class ReachabilityDataset(Dataset):
 
 def collate_graph_batch(batch_list: List[Dict[str, any]]) -> Dict[str, torch.Tensor]:
     """
-    Collate a list of graph samples into batched PyTorch tensors for model ingestion.
+    Collate a list of heterogeneous graph samples into batched PyTorch tensors.
     """
     B = len(batch_list)
     num_nodes = batch_list[0]["num_nodes"]
@@ -209,6 +230,7 @@ def collate_graph_batch(batch_list: List[Dict[str, any]]) -> Dict[str, torch.Ten
     adj = torch.zeros(B, num_nodes, num_nodes, dtype=torch.float32)
     edge_src = torch.zeros(B, num_edges, dtype=torch.long)
     edge_dst = torch.zeros(B, num_edges, dtype=torch.long)
+    edge_rel = torch.zeros(B, num_edges, dtype=torch.long)
     src_idx = torch.zeros(B, dtype=torch.long)
     dst_idx = torch.zeros(B, dtype=torch.long)
     labels = torch.zeros(B, dtype=torch.float32)
@@ -226,10 +248,14 @@ def collate_graph_batch(batch_list: List[Dict[str, any]]) -> Dict[str, torch.Ten
         indicators[b, s, :] = torch.tensor([1.0, 0.0, 0.0])
         indicators[b, d, :] = torch.tensor([0.0, 1.0, 0.0])
 
-        for k, (u, v) in enumerate(item["edges"]):
+        for k, edge_tuple in enumerate(item["edges"]):
+            u = edge_tuple[0]
+            v = edge_tuple[1]
+            r = edge_tuple[2] if len(edge_tuple) > 2 else 0
             adj[b, u, v] = 1.0
             edge_src[b, k] = u
             edge_dst[b, k] = v
+            edge_rel[b, k] = r
 
     return {
         "node_ids": node_ids,
@@ -237,6 +263,7 @@ def collate_graph_batch(batch_list: List[Dict[str, any]]) -> Dict[str, torch.Ten
         "adj": adj,
         "edge_src": edge_src,
         "edge_dst": edge_dst,
+        "edge_rel": edge_rel,
         "src_idx": src_idx,
         "dst_idx": dst_idx,
         "label": labels,
