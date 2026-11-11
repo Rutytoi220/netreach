@@ -1,16 +1,19 @@
 """
-NetReach v3 Training Pipeline: Bidirectional Wavefront Recurrence & Multi-Task Pointer Learning.
+NetReach v4 Training Pipeline: Momentum Wavefront Recurrence, Collision Peak Halting & Multi-Task Pointer Learning.
 
 Architectural Specs:
-- Model: ChallengerLatentNetV3 (Strictly 15.0M - 22.0M parameters).
-- Scaled Enterprise Topologies: N = 128 nodes, M = 384 directed edges.
+- Model: ChallengerLatentNetV4 (Strictly 35.0M - 45.0M parameters).
+- Scaled Enterprise Topologies: N = 256 nodes, M = 768 directed edges.
 - Multi-Relational Edge Modeling: 6 relation types (AdminTo, MemberOf, HasSession, AllowedToDelegate, OpenPort, SubnetRoute).
-- Bidirectional Dual-Wavefront Meet-in-the-Middle Recurrence with Collision Affinity C_t(v).
-- Autonomous Adaptive Computation Time (ACT) conditioned on collision statistics.
+- Bidirectional Dual-Wavefront Meet-in-the-Middle Recurrence with Latent Momentum Buffers V_t:
+    V_{t+1} = beta * V_t + (1 - beta) * Delta H_t
+    H_{t+1} = RMSNorm(H_t + V_{t+1})
+- Collision Peak Detection & Halting (Condition A: Hit, Condition B: Convergence/Dead End).
+- Scale-Invariant Training Curriculum: H in [4, 16], T_train ~ Uniform(4, 12).
 - Multi-Task Loss Weighting: 1.0 * bce + 0.1 * hop_loss + 0.5 * pointer_loss + 0.01 * ponder_cost.
 - AdamW optimizer, cosine annealing learning rate schedule, gradient clipping (1.0).
 - Mixed precision with CUDA bfloat16 autocasting.
-- Metrics logged to results/train_log_v3.json and best checkpoints saved to results/checkpoints/.
+- Metrics logged to results/train_log_v4.json and best checkpoints saved to results/checkpoints/.
 """
 
 import os
@@ -26,7 +29,7 @@ import torch.nn.functional as F
 from rich.console import Console
 
 from data.generator import create_dataloader, RELATION_TYPES
-from netreach.model_v3 import ChallengerLatentNetV3
+from netreach.model_v4 import ChallengerLatentNetV4
 
 console = Console()
 
@@ -42,13 +45,13 @@ def get_device() -> torch.device:
     return device
 
 
-def compute_multitask_loss_v3(
+def compute_multitask_loss_v4(
     out: Dict[str, torch.Tensor],
     batch: Dict[str, torch.Tensor],
     criterion_bce: nn.Module,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """
-    Computes NetReach v3 multi-task weighted loss:
+    Computes NetReach v4 multi-task weighted loss:
     1.0 * bce + 0.1 * hop_loss + 0.5 * pointer_loss + 0.01 * ponder_cost
     """
     labels = batch["label"]
@@ -63,11 +66,11 @@ def compute_multitask_loss_v3(
     loss_bce = criterion_bce(logits, labels)
 
     # 2. Hop distance regression loss:
-    # Reachable targets have exact shortest path H; unreachable targets have distance 35.0
+    # Reachable targets have exact shortest path H; unreachable targets have distance 45.0
     hop_targets = torch.where(
         labels == 1.0,
         hop_lengths.float(),
-        torch.tensor(35.0, device=labels.device),
+        torch.tensor(45.0, device=labels.device),
     )
     loss_hop = F.smooth_l1_loss(pred_hops, hop_targets)
 
@@ -100,6 +103,11 @@ def compute_multitask_loss_v3(
     return total_loss, metrics
 
 
+# Backward compatibility alias
+compute_multitask_loss_v3 = compute_multitask_loss_v4
+
+
+
 def train_one_epoch(
     model: nn.Module,
     dataloader: torch.utils.data.DataLoader,
@@ -118,26 +126,23 @@ def train_one_epoch(
     total_ponder = 0.0
     correct = 0
     total = 0
-    act_steps_total = 0.0
+    steps_total = 0.0
 
     for batch in dataloader:
         batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
         labels = batch["label"]
         optimizer.zero_grad(set_to_none=True)
 
-        # Scale-invariant training: dynamically alternate between uniform steps and ACT mode
-        if random.random() < 0.5:
-            step_budget = random.randint(4, 8)
-        else:
-            step_budget = None
+        # Scale-invariant training: dynamically sample T_train ~ Uniform(4, 12)
+        step_budget = random.randint(4, 12)
 
         if use_bf16:
             with torch.amp.autocast("cuda", dtype=torch.bfloat16):
                 out = model(batch, steps=step_budget)
-                loss, metrics = compute_multitask_loss_v3(out, batch, criterion_bce)
+                loss, metrics = compute_multitask_loss_v4(out, batch, criterion_bce)
         else:
             out = model(batch, steps=step_budget)
-            loss, metrics = compute_multitask_loss_v3(out, batch, criterion_bce)
+            loss, metrics = compute_multitask_loss_v4(out, batch, criterion_bce)
 
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -155,7 +160,7 @@ def train_one_epoch(
         total_hop += metrics["loss_hop"] * batch_size
         total_pointer += metrics["loss_pointer"] * batch_size
         total_ponder += metrics["ponder_cost"] * batch_size
-        act_steps_total += out["steps_taken"].sum().item()
+        steps_total += out["steps_taken"].sum().item()
 
     return {
         "loss": total_loss / total,
@@ -164,7 +169,7 @@ def train_one_epoch(
         "loss_pointer": total_pointer / total,
         "ponder_cost": total_ponder / total,
         "acc": correct / total,
-        "mean_steps": act_steps_total / total,
+        "mean_steps": steps_total / total,
     }
 
 
@@ -175,14 +180,15 @@ def evaluate_epoch(
     criterion_bce: nn.Module,
     device: torch.device,
     use_bf16: bool,
+    steps: Optional[int] = 8,
 ) -> Dict[str, float]:
-    """Validation evaluation under dynamic ACT mode."""
+    """Validation evaluation under bidirectional unroll mode (T=8 steps to resolve H in [4, 16])."""
     model.eval()
     total_loss = 0.0
     correct = 0
     total = 0
     hop_mae = 0.0
-    act_steps_total = 0.0
+    steps_total = 0.0
 
     for batch in dataloader:
         batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
@@ -191,11 +197,11 @@ def evaluate_epoch(
 
         if use_bf16:
             with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-                out = model(batch, steps=None)
-                loss, _ = compute_multitask_loss_v3(out, batch, criterion_bce)
+                out = model(batch, steps=steps)
+                loss, _ = compute_multitask_loss_v4(out, batch, criterion_bce)
         else:
-            out = model(batch, steps=None)
-            loss, _ = compute_multitask_loss_v3(out, batch, criterion_bce)
+            out = model(batch, steps=steps)
+            loss, _ = compute_multitask_loss_v4(out, batch, criterion_bce)
 
         logits = out["logit"]
         preds = (torch.sigmoid(logits) >= 0.5).float()
@@ -204,7 +210,7 @@ def evaluate_epoch(
         correct += (preds == labels).sum().item()
         total += batch_size
         total_loss += loss.item() * batch_size
-        act_steps_total += out["steps_taken"].sum().item()
+        steps_total += out["steps_taken"].sum().item()
 
         # Compute MAE on reachable pairs
         reachable_mask = labels == 1.0
@@ -218,7 +224,7 @@ def evaluate_epoch(
         "loss": total_loss / total,
         "acc": correct / total,
         "hop_mae": hop_mae / reachable_count,
-        "mean_steps": act_steps_total / total,
+        "mean_steps": steps_total / total,
     }
 
 
@@ -233,14 +239,14 @@ def train_model(
     use_bf16: bool,
     checkpoint_dir: str,
 ) -> List[Dict[str, Any]]:
-    """Train a single model and return history."""
+    """Train NetReach v4 model and return history."""
     console.print(f"\n[bold cyan]=== Starting Training: {model_name} ===[/bold cyan]")
     param_count = sum(p.numel() for p in model.parameters() if p.requires_grad)
     console.print(f"[bold magenta]{model_name} Parameter Count:[/bold magenta] {param_count:,}")
 
     assert (
-        15_000_000 <= param_count <= 22_000_000
-    ), f"Parameter count {param_count:,} violates [15.0M, 22.0M] constraint!"
+        35_000_000 <= param_count <= 45_000_000
+    ), f"Parameter count {param_count:,} violates [35.0M, 45.0M] constraint!"
 
     model = model.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
@@ -277,7 +283,7 @@ def train_model(
             f"Train Loss: {train_metrics['loss']:.4f} (BCE: {train_metrics['loss_bce']:.3f}, Hop: {train_metrics['loss_hop']:.3f}, Ptr: {train_metrics['loss_pointer']:.3f}) | "
             f"Train Acc: {train_metrics['acc']*100:.1f}% | "
             f"Val Acc: {val_metrics['acc']*100:.1f}% | "
-            f"ACT Steps: {train_metrics['mean_steps']:.1f} | "
+            f"Peak Halting Steps: {val_metrics['mean_steps']:.1f} | "
             f"LR: {curr_lr:.2e} | Time: {dt:.2f}s"
         )
 
@@ -288,7 +294,7 @@ def train_model(
             "val_loss": val_metrics["loss"],
             "val_acc": val_metrics["acc"],
             "val_hop_mae": val_metrics.get("hop_mae", 0.0),
-            "act_steps": train_metrics["mean_steps"],
+            "val_halting_steps": val_metrics["mean_steps"],
             "lr": curr_lr,
             "time": dt,
         }
@@ -304,7 +310,7 @@ def train_model(
                     "model_state_dict": model.state_dict(),
                     "val_acc": best_val_acc,
                     "param_count": param_count,
-                    "architecture": "ChallengerLatentNetV3",
+                    "architecture": "ChallengerLatentNetV4",
                 },
                 ckpt_path,
             )
@@ -314,14 +320,14 @@ def train_model(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train NetReach v3 models with Dual-Wavefront Recurrence and ACT.")
+    parser = argparse.ArgumentParser(description="Train NetReach v4 models with Momentum Wavefront Recurrence and Collision Peak Halting.")
     parser.add_argument("--epochs", type=int, default=15, help="Number of training epochs")
-    parser.add_argument("--batch_size", type=int, default=8, help="Batch size")
+    parser.add_argument("--batch_size", type=int, default=4, help="Batch size (default 4 for safe GPU VRAM)")
     parser.add_argument("--lr", type=float, default=2e-4, help="Initial learning rate")
-    parser.add_argument("--train_samples", type=int, default=2400, help="Number of training samples")
-    parser.add_argument("--val_samples", type=int, default=480, help="Number of validation samples")
-    parser.add_argument("--num_nodes", type=int, default=128, help="Number of nodes per graph")
-    parser.add_argument("--target_edges", type=int, default=384, help="Target edges per graph")
+    parser.add_argument("--train_samples", type=int, default=1800, help="Number of training samples")
+    parser.add_argument("--val_samples", type=int, default=360, help="Number of validation samples")
+    parser.add_argument("--num_nodes", type=int, default=256, help="Number of nodes per graph")
+    parser.add_argument("--target_edges", type=int, default=768, help="Target edges per graph")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--output_dir", type=str, default="results", help="Directory for logs and checkpoints")
     parser.add_argument("--smoke_test", action="store_true", help="Run 1 epoch smoke test")
@@ -329,10 +335,10 @@ def main():
 
     if args.smoke_test:
         args.epochs = 1
-        args.train_samples = 48
-        args.val_samples = 24
-        args.batch_size = 8
-        console.print("[bold yellow]Running SMOKE TEST mode (1 epoch, 48 samples).[/bold yellow]")
+        args.train_samples = 32
+        args.val_samples = 16
+        args.batch_size = 4
+        console.print("[bold yellow]Running SMOKE TEST mode (1 epoch, 32 samples).[/bold yellow]")
 
     checkpoint_dir = os.path.join(args.output_dir, "checkpoints")
     os.makedirs(checkpoint_dir, exist_ok=True)
@@ -346,11 +352,11 @@ def main():
     device = get_device()
     use_bf16 = (device.type == "cuda" and torch.cuda.is_bf16_supported())
 
-    # Training distribution: H in [4, 10]
-    train_hops = list(range(4, 11))
-    val_hops = list(range(4, 11))
+    # Training distribution: H in [4, 16]
+    train_hops = list(range(4, 17))
+    val_hops = list(range(4, 17))
 
-    console.print(f"Generating multi-relational training dataset (N={args.num_nodes}, M={args.target_edges}, H in [4..10], 6 Relations)...")
+    console.print(f"Generating multi-relational training dataset (N={args.num_nodes}, M={args.target_edges}, H in [4..16], 6 Relations)...")
     train_loader = create_dataloader(
         hop_lengths=train_hops,
         num_samples=args.train_samples,
@@ -370,11 +376,11 @@ def main():
         seed=args.seed + 1,
     )
 
-    model = ChallengerLatentNetV3(
+    model = ChallengerLatentNetV4(
         num_nodes=args.num_nodes,
         node_embed_dim=256,
-        d_model=512,
-        hidden_dim=1024,
+        d_model=640,
+        hidden_dim=1280,
         nhead=8,
         rel_dim=128,
         num_relations=8,
@@ -382,7 +388,7 @@ def main():
     )
 
     history = train_model(
-        model_name="ChallengerLatentNetV3",
+        model_name="ChallengerLatentNetV4",
         model=model,
         train_loader=train_loader,
         val_loader=val_loader,
@@ -393,18 +399,18 @@ def main():
         checkpoint_dir=checkpoint_dir,
     )
 
-    log_path = os.path.join(args.output_dir, "train_log_v3.json")
+    log_path = os.path.join(args.output_dir, "train_log_v4.json")
     with open(log_path, "w") as f:
         json.dump(
             {
-                "model": "ChallengerLatentNetV3",
+                "model": "ChallengerLatentNetV4",
                 "param_count": model.count_parameters(),
                 "history": history,
             },
             f,
             indent=2,
         )
-    console.print(f"\n[bold green]Saved NetReach v3 training logs to {log_path}[/bold green]")
+    console.print(f"\n[bold green]Saved NetReach v4 training logs to {log_path}[/bold green]")
 
 
 if __name__ == "__main__":

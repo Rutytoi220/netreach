@@ -1,6 +1,11 @@
 from models.baseline_transformer import BaselineTransformer
 from models.baseline_gru import BaselineGRU
-from models.challenger_latent_net import ChallengerLatentNet, ChallengerLatentNetV2, ChallengerLatentNetV3
+from models.challenger_latent_net import (
+    ChallengerLatentNet,
+    ChallengerLatentNetV2,
+    ChallengerLatentNetV3,
+    ChallengerLatentNetV4,
+)
 
 __all__ = [
     "BaselineTransformer",
@@ -8,4 +13,5 @@ __all__ = [
     "ChallengerLatentNet",
     "ChallengerLatentNetV2",
     "ChallengerLatentNetV3",
+    "ChallengerLatentNetV4",
 ]

@@ -37,8 +37,8 @@ NUM_RELATIONS = len(RELATION_TYPES)
 def generate_graph_sample(
     H: int,
     reachable: bool,
-    num_nodes: int = 128,
-    target_edges: int = 384,
+    num_nodes: int = 256,
+    target_edges: int = 768,
     rng: Optional[random.Random] = None,
 ) -> Tuple[List[Tuple[int, int, int]], int, int, int, int, List[int]]:
     """
@@ -192,8 +192,8 @@ class ReachabilityDataset(Dataset):
         self,
         hop_lengths: List[int],
         num_samples: int,
-        num_nodes: int = 128,
-        target_edges: int = 384,
+        num_nodes: int = 256,
+        target_edges: int = 768,
         seed: int = 42,
     ):
         super().__init__()
@@ -299,8 +299,8 @@ def create_dataloader(
     hop_lengths: List[int],
     num_samples: int,
     batch_size: int = 32,
-    num_nodes: int = 128,
-    target_edges: int = 384,
+    num_nodes: int = 256,
+    target_edges: int = 768,
     shuffle: bool = True,
     seed: int = 42,
 ) -> DataLoader:

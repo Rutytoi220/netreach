@@ -4,12 +4,13 @@ NetReach: Neural Attack Path Reachability & Lateral Movement Analysis Engine.
 
 from netreach.model import ChallengerLatentNet
 from netreach.model_v2 import ChallengerLatentNetV2
-from netreach.model_v3 import ChallengerLatentNetV3, RELATION_TYPES, RELATION_TO_ID
+from netreach.model_v3 import ChallengerLatentNetV3
+from netreach.model_v4 import ChallengerLatentNetV4, RELATION_TYPES, RELATION_TO_ID
 from netreach.engine import NetReachEngine, AuditResult
 from netreach.adapters.graph_loader import load_graph
 from netreach.adapters.extractor import extract_subgraph
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
     "NetReachEngine",
@@ -17,6 +18,7 @@ __all__ = [
     "ChallengerLatentNet",
     "ChallengerLatentNetV2",
     "ChallengerLatentNetV3",
+    "ChallengerLatentNetV4",
     "RELATION_TYPES",
     "RELATION_TO_ID",
     "load_graph",
