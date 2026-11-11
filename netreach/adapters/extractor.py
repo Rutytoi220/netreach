@@ -202,6 +202,9 @@ def prepare_graph_batch(
         edge_dst[0, k] = d_idx
         edge_rel[0, k] = RELATION_TO_ID.get("SubnetRoute", 5)
 
+    node_mask = torch.zeros(B, N, dtype=torch.bool, device=device)
+    node_mask[0, : len(ordered_nodes)] = True
+
     return {
         "node_ids": node_ids,
         "indicators": indicators,
@@ -209,6 +212,7 @@ def prepare_graph_batch(
         "edge_src": edge_src,
         "edge_dst": edge_dst,
         "edge_rel": edge_rel,
+        "node_mask": node_mask,
         "src_idx": torch.tensor([0], dtype=torch.long, device=device),
         "dst_idx": torch.tensor([1], dtype=torch.long, device=device),
         "node_names": all_nodes,

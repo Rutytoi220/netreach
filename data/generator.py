@@ -292,6 +292,7 @@ def collate_graph_batch(batch_list: List[Dict[str, any]]) -> Dict[str, torch.Ten
         "label": labels,
         "hop_length": hop_lengths,
         "next_hop": next_hops,
+        "node_mask": torch.ones(B, num_nodes, dtype=torch.bool),
     }
 
 

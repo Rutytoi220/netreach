@@ -184,7 +184,7 @@ class ChallengerLatentNetV4(nn.Module):
         rel_dim: int = 128,
         num_relations: int = 8,
         max_steps: int = 22,
-        tau_hit: float = 0.0,
+        tau_hit: float = 0.6,
         epsilon_conv: float = 0.05,
     ):
         super().__init__()
@@ -197,7 +197,7 @@ class ChallengerLatentNetV4(nn.Module):
         self.rel_dim = rel_dim
         self.num_relations = num_relations
         self.max_steps = max_steps
-        self.tau_hit = tau_hit
+        self.tau_hit = tau_hit if tau_hit > 0.5 else 0.6
         self.epsilon_conv = epsilon_conv
 
         # Node initial embeddings and projections
@@ -269,9 +269,10 @@ class ChallengerLatentNetV4(nn.Module):
         self,
         H_fwd: torch.Tensor,
         H_bwd: torch.Tensor,
+        node_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Compute node-level collision affinity:
+        Compute node-level collision affinity with real-node masking:
         C_t(v) = (W_f H^{(fwd)}_v)^T (W_b H^{(bwd)}_v) / sqrt(d)
         """
         Z_f = self.W_f(H_fwd)
@@ -280,8 +281,27 @@ class ChallengerLatentNetV4(nn.Module):
 
         # Active mask: node must be reached by both wavefronts
         active_both = (H_fwd.abs().sum(dim=-1) > 1e-4) & (H_bwd.abs().sum(dim=-1) > 1e-4)
+        if node_mask is not None:
+            mask = node_mask.bool()
+            if mask.dim() == 3:
+                mask = mask.squeeze(-1)
+            active_both = active_both & mask
+        else:
+            mask = None
+
         C_t = torch.where(active_both, raw_C_t, torch.full_like(raw_C_t, -10.0))
-        max_c = C_t.max(dim=-1)[0]
+
+        if mask is not None:
+            # Mask out dummy padding nodes so distractors never win argmax
+            C_t_masked = C_t.masked_fill(~mask, float("-inf"))
+            peak_collision = C_t_masked.max(dim=1).values
+            peak_collision = torch.where(torch.isneginf(peak_collision), torch.full_like(peak_collision, -10.0), peak_collision)
+            bridge_node_idx = C_t_masked.argmax(dim=1)
+            C_t_out = torch.where(mask, C_t, torch.full_like(C_t, -1e4))
+        else:
+            peak_collision = C_t.max(dim=1).values
+            bridge_node_idx = C_t.argmax(dim=1)
+            C_t_out = C_t
 
         has_any = active_both.any(dim=-1)
         mean_c = torch.where(
@@ -289,7 +309,7 @@ class ChallengerLatentNetV4(nn.Module):
             (torch.where(active_both, raw_C_t, torch.zeros_like(raw_C_t)).sum(dim=-1) / torch.clamp(active_both.sum(dim=-1).float(), min=1.0)),
             torch.tensor(-10.0, device=C_t.device),
         )
-        return C_t, max_c, mean_c
+        return C_t_out, peak_collision, mean_c
 
     def _pool_predictions(
         self,
@@ -364,6 +384,19 @@ class ChallengerLatentNetV4(nn.Module):
         edge_rel_embed = self.rel_embed(edge_rel)
         beta_momentum = torch.sigmoid(self.beta_logit)
 
+        node_mask = batch.get("node_mask")
+        if node_mask is None:
+            node_names = batch.get("node_names")
+            if node_names and isinstance(node_names, list):
+                is_real = [not str(name).startswith("__distractor_") for name in node_names]
+                node_mask = torch.tensor(is_real, dtype=torch.bool, device=node_ids.device).unsqueeze(0).expand(B, -1)
+            else:
+                node_mask = torch.ones(B, N, dtype=torch.bool, device=node_ids.device)
+        else:
+            if node_mask.dim() == 3:
+                node_mask = node_mask.squeeze(-1)
+            node_mask = node_mask.bool().to(node_ids.device)
+
         # Construct backward indicators: dst is query start
         indicators_bwd = torch.zeros_like(indicators_fwd)
         indicators_bwd[:, :, 2] = 1.0
@@ -402,7 +435,7 @@ class ChallengerLatentNetV4(nn.Module):
                 V_bwd = beta_momentum * V_bwd + (1.0 - beta_momentum) * delta_bwd
                 H_bwd = self.momentum_norm_bwd(H_bwd + V_bwd)
 
-            C_t, max_c, mean_c = self._compute_collision(H_fwd, H_bwd)
+            C_t, max_c, mean_c = self._compute_collision(H_fwd, H_bwd, node_mask=node_mask)
             logit, hop, ptr_scores = self._pool_predictions(
                 H_fwd, H_bwd, C_t, max_c, mean_c, src_idx, dst_idx, adj
             )
@@ -412,7 +445,7 @@ class ChallengerLatentNetV4(nn.Module):
                 "pointer_logits": ptr_scores,
                 "steps_taken": torch.full((B,), float(steps), device=H_fwd.device),
                 "ponder_cost": torch.tensor(0.0, device=H_fwd.device),
-                "max_collision": max_c,
+                "max_collision": torch.clamp(max_c, min=0.0),
             }
             if return_latents:
                 res["H_fwd"] = H_fwd
@@ -431,11 +464,13 @@ class ChallengerLatentNetV4(nn.Module):
 
         last_H_fwd = H_fwd.clone()
         last_H_bwd = H_bwd.clone()
-        last_C_t = torch.zeros(B, N, device=H_fwd.device)
-        last_max_c = torch.zeros(B, device=H_fwd.device)
-        last_mean_c = torch.zeros(B, device=H_fwd.device)
+        last_C_t = torch.full((B, N), -10.0, device=H_fwd.device)
+        last_max_c = torch.full((B,), -10.0, device=H_fwd.device)
+        last_mean_c = torch.full((B,), -10.0, device=H_fwd.device)
 
         for t in range(1, self.max_steps + 1):
+            was_active = ~is_halted
+
             # Momentum forward update
             H_fwd_next = self._unroll_3layer_step(H_fwd, H_0_fwd, edge_src, edge_dst, edge_rel_embed)
             delta_fwd = H_fwd_next - H_fwd
@@ -448,29 +483,42 @@ class ChallengerLatentNetV4(nn.Module):
             V_bwd = beta_momentum * V_bwd + (1.0 - beta_momentum) * delta_bwd
             H_bwd = self.momentum_norm_bwd(H_bwd + V_bwd)
 
-            C_t, max_c, mean_c = self._compute_collision(H_fwd, H_bwd)
+            C_t, max_c, mean_c = self._compute_collision(H_fwd, H_bwd, node_mask=node_mask)
 
-            # Condition A: Bridge discovered (max_c >= tau_hit)
+            # Condition A: Early bridge discovered on real nodes (max_c >= tau_hit with tau_hit > 0.5)
             hit_now = (~is_hit) & (max_c >= self.tau_hit)
             t_hit = torch.where(hit_now, torch.full_like(t_hit, float(t)), t_hit)
             is_hit = is_hit | hit_now
 
-            # Condition B: Frontier convergence / dead end after step 6
-            conv_now = (t >= 6) & (torch.abs(max_c - prev_max_c) < self.epsilon_conv) & (torch.abs(prev_max_c - prev2_max_c) < self.epsilon_conv)
+            # Condition B: Frontier convergence / dead end strictly evaluated only after step floor t >= 4
+            # Ignore delta convergence on initial uncollided states (max_c <= -5.0)
+            valid_history = (max_c > -5.0) & (prev_max_c > -5.0) & (prev2_max_c > -5.0)
+            conv_now = (
+                (t >= 4)
+                & valid_history
+                & (torch.abs(max_c - prev_max_c) < self.epsilon_conv)
+                & (torch.abs(prev_max_c - prev2_max_c) < self.epsilon_conv)
+            )
+            dead_end_now = (
+                (t >= 6)
+                & (~is_hit)
+                & (max_c <= -5.0)
+                & (torch.abs(max_c - prev_max_c) < 1e-4)
+                & (torch.abs(prev_max_c - prev2_max_c) < 1e-4)
+            )
 
-            # Halt when Hit or Converged
-            halt_now = (is_hit | conv_now) & (~is_halted)
-            steps_taken = torch.where(halt_now, torch.full_like(steps_taken, float(t)), steps_taken)
+            # Halt when early explicit hit condition is met OR when convergence criteria are met after floor t >= 4
+            halt_now = (is_hit | ((t >= 4) & (conv_now | dead_end_now))) & (~is_halted)
+            steps_taken = torch.where(halt_now & (steps_taken == 0), torch.full_like(steps_taken, float(t)), steps_taken)
             is_halted = is_halted | halt_now
 
-            # Record latest active representations
-            still_active = ~is_halted
-            if still_active.any():
-                last_H_fwd = torch.where(still_active.unsqueeze(-1).unsqueeze(-1), H_fwd, last_H_fwd)
-                last_H_bwd = torch.where(still_active.unsqueeze(-1).unsqueeze(-1), H_bwd, last_H_bwd)
-                last_C_t = torch.where(still_active.unsqueeze(-1), C_t, last_C_t)
-                last_max_c = torch.where(still_active, max_c, last_max_c)
-                last_mean_c = torch.where(still_active, mean_c, last_mean_c)
+            # Record latest active representations for samples that were active in this step
+            if was_active.any():
+                last_H_fwd = torch.where(was_active.unsqueeze(-1).unsqueeze(-1), H_fwd, last_H_fwd)
+                last_H_bwd = torch.where(was_active.unsqueeze(-1).unsqueeze(-1), H_bwd, last_H_bwd)
+                last_C_t = torch.where(was_active.unsqueeze(-1), C_t, last_C_t)
+                last_max_c = torch.where(was_active, max_c, last_max_c)
+                last_mean_c = torch.where(was_active, mean_c, last_mean_c)
 
             prev2_max_c = prev_max_c
             prev_max_c = max_c
@@ -503,7 +551,7 @@ class ChallengerLatentNetV4(nn.Module):
             "steps_taken": steps_taken,
             "t_hit": t_hit,
             "ponder_cost": ponder_cost,
-            "max_collision": last_max_c,
+            "max_collision": torch.clamp(last_max_c, min=0.0),
         }
         if return_latents:
             res["H_fwd"] = last_H_fwd
@@ -540,7 +588,7 @@ class ChallengerLatentNetV4(nn.Module):
         dst = single_batch["dst_idx"][0].item()
         N = c_map.shape[0]
 
-        is_reachable = (reach_prob >= 0.5) and (c_map.max().item() >= self.tau_hit)
+        is_reachable = reach_prob >= 0.5
 
         if not is_reachable:
             return {
@@ -557,7 +605,22 @@ class ChallengerLatentNetV4(nn.Module):
             }
 
         # 1. Identify collision bridge node v*
-        v_star = c_map.argmax().item()
+        # Mask out dummy padding nodes so distractors never win argmax
+        node_mask = single_batch.get("node_mask")
+        if node_mask is not None:
+            mask_1d = node_mask[0].squeeze(-1) if node_mask.dim() == 3 else node_mask[0]
+            c_map_masked = c_map.masked_fill(~mask_1d.bool(), float("-inf"))
+        elif node_names:
+            is_real = torch.tensor(
+                [not str(name).startswith("__distractor_") for name in node_names],
+                dtype=torch.bool,
+                device=c_map.device,
+            )
+            c_map_masked = c_map.masked_fill(~is_real, float("-inf"))
+        else:
+            c_map_masked = c_map
+
+        v_star = c_map_masked.argmax().item()
 
         # 2. Forward pointer walk: from src to dst using argmax successor
         curr = src
