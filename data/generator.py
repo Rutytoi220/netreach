@@ -1,16 +1,18 @@
 """
-Data generator for Directed Graph Reachability with Multi-Relational Edge Modeling.
+Data generator for Directed Graph Reachability with Multi-Relational Edge Modeling,
+Scaled Enterprise Topologies (N = 128, M = 384, H <= 32), and Next-Hop Pointer Supervision.
 
 Features:
 - Exact shortest-path controls using NetworkX.
 - Supports 6 directed relation types:
   AdminTo, MemberOf, HasSession, AllowedToDelegate, OpenPort, SubnetRoute.
-- Supports expanded graph sizes: default N = 48 nodes, target_edges = 96.
-- Training distribution: Path lengths H in [3, 5].
-- Evaluation distribution: In-distribution (H in [3, 5]) and Out-of-Distribution (H in [6, 8, 10, 12, 16, 20]).
-- Perfectly balanced classes (50% reachable, 50% unreachable).
-- Unreachable pairs matched in node count (N = 48) and edge density (target_edges = 96)
+- Supports expanded enterprise scale: default N = 128 nodes, target_edges = 384.
+- Training distribution: Path lengths H in [4, 10].
+- Evaluation distribution: In-distribution (H in [4, 8]) and Out-of-Distribution (H in [12, 16, 20, 24, 32]).
+- Balanced classes (50% reachable, 50% unreachable).
+- Unreachable pairs matched in node count (N = 128) and edge density (target_edges = 384)
   to prevent structural cheating.
+- Ground-truth next-hop pointer vector generation for decoder supervision.
 - Node ID permutation and edge order shuffling to prevent positional shortcut learning.
 """
 
@@ -35,18 +37,18 @@ NUM_RELATIONS = len(RELATION_TYPES)
 def generate_graph_sample(
     H: int,
     reachable: bool,
-    num_nodes: int = 48,
-    target_edges: int = 96,
+    num_nodes: int = 128,
+    target_edges: int = 384,
     rng: Optional[random.Random] = None,
-) -> Tuple[List[Tuple[int, int, int]], int, int, int, int]:
+) -> Tuple[List[Tuple[int, int, int]], int, int, int, int, List[int]]:
     """
     Generate a single heterogeneous directed graph reachability sample.
 
     Args:
         H: Target shortest path length between src and dst.
         reachable: Whether a directed path from src to dst should exist.
-        num_nodes: Number of nodes in the graph (default: 48).
-        target_edges: Exact target edge count (default: 96).
+        num_nodes: Number of nodes in the graph (default: 128).
+        target_edges: Exact target edge count (default: 384).
         rng: Optional random.Random instance for reproducibility.
 
     Returns:
@@ -55,6 +57,7 @@ def generate_graph_sample(
         dst: Destination node ID.
         label: 1 if reachable, 0 if unreachable.
         H: Target shortest path length.
+        next_hop: Next-hop pointer target vector of length num_nodes (-1 for invalid/non-path).
     """
     if rng is None:
         rng = random.Random()
@@ -101,7 +104,7 @@ def generate_graph_sample(
     else:
         # Unreachable pair construction:
         # Partition into two balanced sets S1 (containing src) and S2 (containing dst).
-        # For N=48, each partition has 24 nodes, supporting paths up to H=20 (21 nodes).
+        # For N=128, each partition has 64 nodes, supporting paths up to H=32 (33 nodes).
         all_nodes = list(range(num_nodes))
         rng.shuffle(all_nodes)
         half = num_nodes // 2
@@ -150,6 +153,7 @@ def generate_graph_sample(
             G, src, dst
         ), "Error: unreachable sample contains a path from src to dst"
         label = 0
+        path = []
 
     # Prevent positional and node ID shortcut learning:
     # 1. Randomly permute node IDs
@@ -163,23 +167,33 @@ def generate_graph_sample(
         for u, v in G.edges()
     ]
 
+    # Ground-truth next-hop pointer vector
+    next_hop = [-1] * num_nodes
+    if reachable and len(path) > 0:
+        perm_path = [perm_map[node] for node in path]
+        for i in range(len(perm_path) - 1):
+            next_hop[perm_path[i]] = perm_path[i + 1]
+        # Target node points to itself as end-of-path
+        next_hop[perm_path[-1]] = perm_path[-1]
+
     # 2. Randomly shuffle edge sequence order
     rng.shuffle(edges)
 
-    return edges, new_src, new_dst, label, H
+    return edges, new_src, new_dst, label, H, next_hop
 
 
 class ReachabilityDataset(Dataset):
     """
-    Dataset for directed graph reachability with controlled path lengths and relations.
+    Dataset for directed graph reachability with controlled path lengths, relations,
+    and next-hop pointer sequence ground truth.
     """
 
     def __init__(
         self,
         hop_lengths: List[int],
         num_samples: int,
-        num_nodes: int = 48,
-        target_edges: int = 96,
+        num_nodes: int = 128,
+        target_edges: int = 384,
         seed: int = 42,
     ):
         super().__init__()
@@ -206,7 +220,9 @@ class ReachabilityDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, idx: int) -> Dict[str, any]:
-        edges, src, dst, label, h = self.samples[idx]
+        sample = self.samples[idx]
+        edges, src, dst, label, h = sample[:5]
+        next_hop = sample[5] if len(sample) > 5 else [-1] * self.num_nodes
         return {
             "edges": edges,
             "src": src,
@@ -214,6 +230,7 @@ class ReachabilityDataset(Dataset):
             "label": label,
             "hop_length": h,
             "num_nodes": self.num_nodes,
+            "next_hop": next_hop,
         }
 
 
@@ -235,6 +252,7 @@ def collate_graph_batch(batch_list: List[Dict[str, any]]) -> Dict[str, torch.Ten
     dst_idx = torch.zeros(B, dtype=torch.long)
     labels = torch.zeros(B, dtype=torch.float32)
     hop_lengths = torch.zeros(B, dtype=torch.long)
+    next_hops = torch.full((B, num_nodes), -1, dtype=torch.long)
 
     for b, item in enumerate(batch_list):
         s = item["src"]
@@ -243,6 +261,9 @@ def collate_graph_batch(batch_list: List[Dict[str, any]]) -> Dict[str, torch.Ten
         dst_idx[b] = d
         labels[b] = float(item["label"])
         hop_lengths[b] = item["hop_length"]
+
+        if "next_hop" in item:
+            next_hops[b] = torch.tensor(item["next_hop"], dtype=torch.long)
 
         indicators[b, :, 2] = 1.0
         indicators[b, s, :] = torch.tensor([1.0, 0.0, 0.0])
@@ -264,23 +285,26 @@ def collate_graph_batch(batch_list: List[Dict[str, any]]) -> Dict[str, torch.Ten
         "edge_src": edge_src,
         "edge_dst": edge_dst,
         "edge_rel": edge_rel,
+        "edge_src_bwd": edge_dst,
+        "edge_dst_bwd": edge_src,
         "src_idx": src_idx,
         "dst_idx": dst_idx,
         "label": labels,
         "hop_length": hop_lengths,
+        "next_hop": next_hops,
     }
 
 
 def create_dataloader(
     hop_lengths: List[int],
     num_samples: int,
-    batch_size: int = 64,
+    batch_size: int = 32,
+    num_nodes: int = 128,
+    target_edges: int = 384,
     shuffle: bool = True,
-    num_nodes: int = 48,
-    target_edges: int = 96,
     seed: int = 42,
 ) -> DataLoader:
-    """Helper to instantiate a ready-to-use DataLoader."""
+    """Helper factory for graph DataLoader."""
     dataset = ReachabilityDataset(
         hop_lengths=hop_lengths,
         num_samples=num_samples,
@@ -293,5 +317,5 @@ def create_dataloader(
         batch_size=batch_size,
         shuffle=shuffle,
         collate_fn=collate_graph_batch,
-        pin_memory=True,
+        pin_memory=torch.cuda.is_available(),
     )

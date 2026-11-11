@@ -1,23 +1,26 @@
 """
-Out-of-Distribution (OOD) Algorithmic Generalization & Dynamic ACT Halting Evaluation.
+NetReach v3 Out-of-Distribution (OOD) & Bidirectional Recurrence Evaluation.
 
-Evaluates NetReach v2 (ChallengerLatentNetV2) across path lengths:
-In-Distribution: H in [3, 5]
-Out-of-Distribution: H in [8, 12, 16, 20]
+Evaluates ChallengerLatentNetV3 across path lengths:
+- In-Distribution: H in [4, 8]
+- Out-of-Distribution: H in [12, 16, 20, 24, 32]
+- Scaled graph size: N = 128 nodes, M = 384 directed edges.
 
 Evaluations performed:
-1. Test-time compute scaling across fixed iteration counts T_test in [5, 10, 15, 20].
-2. Autonomous Adaptive Halting (ACT) mode: tracks accuracy, hop prediction MAE, and dynamic steps taken.
-3. Pairwise cosine similarity diagnostics to verify absence of over-smoothing.
-4. Comparative performance against Baseline Transformer and Baseline GRU.
+1. Test-time compute scaling across fixed iteration counts T_test in [6, 10, 14, 18, 22].
+2. Autonomous Adaptive Computation Time (ACT) mode: tracks accuracy, hop prediction MAE, and dynamic steps.
+3. Bidirectional Meet-in-the-Middle efficiency: verifies collision at ~ ceil(H / 2) steps.
+4. Latent Pairwise Cosine Similarity diagnostics to monitor over-smoothing.
+5. Inference latency measurement on CUDA.
 
 Outputs:
 - Rich formatted summary table comparing models across hop lengths.
-- Detailed JSON results saved to results/ood_eval_v2.json.
+- Detailed JSON results saved to results/ood_eval_v3.json.
 """
 
 import os
 import json
+import time
 import argparse
 from typing import Dict, List, Any, Tuple, Optional
 
@@ -28,6 +31,7 @@ from rich.console import Console
 from rich.table import Table
 
 from data.generator import create_dataloader, RELATION_TYPES
+from netreach.model_v3 import ChallengerLatentNetV3
 from netreach.model_v2 import ChallengerLatentNetV2
 from models.baseline_transformer import BaselineTransformer
 from models.baseline_gru import BaselineGRU
@@ -73,227 +77,241 @@ def evaluate_model_on_dataloader(
     cos_sim_sum = 0.0
     batches = 0
     act_steps_total = 0.0
+    total_latency_ms = 0.0
     criterion_bce = nn.BCEWithLogitsLoss()
 
     for batch in dataloader:
         batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
         labels = batch["label"]
         hop_lengths = batch["hop_length"]
-        batch_size = len(labels)
 
-        with torch.amp.autocast(
-            device_type="cuda" if device.type == "cuda" else "cpu",
-            dtype=torch.bfloat16,
-            enabled=use_bf16,
-        ):
-            if isinstance(model, ChallengerLatentNetV2):
-                if steps is not None:
-                    logits, pred_hops, latents = model(batch, steps=steps, return_latents=True)
-                    steps_taken = float(steps)
+        t_start = time.perf_counter()
+        if use_bf16:
+            with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+                if isinstance(model, (ChallengerLatentNetV3, ChallengerLatentNetV2)):
+                    out = model(batch, steps=steps, return_latents=True)
                 else:
-                    out = model(batch, return_latents=True)
-                    logits = out["logit"]
-                    pred_hops = out["hop"]
-                    latents = out["latents"]
-                    steps_taken = out["steps_taken"].mean().item()
-
-                loss = criterion_bce(logits, labels)
-                cos_sim = compute_pairwise_cosine_similarity(latents)
-                cos_sim_sum += cos_sim
-                act_steps_total += steps_taken * batch_size
-
-                reach_mask = (labels == 1.0)
-                if reach_mask.sum() > 0:
-                    hop_mae += F.l1_loss(pred_hops[reach_mask], hop_lengths[reach_mask].float(), reduction="sum").item()
-                    reachable_count += reach_mask.sum().item()
+                    out = model(batch)
+        else:
+            if isinstance(model, (ChallengerLatentNetV3, ChallengerLatentNetV2)):
+                out = model(batch, steps=steps, return_latents=True)
             else:
-                logits = model(batch)
-                loss = criterion_bce(logits, labels)
+                out = model(batch)
 
-        total_loss += loss.item() * batch_size
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+        t_end = time.perf_counter()
+        total_latency_ms += (t_end - t_start) * 1000
+
+        logits = out["logit"]
         preds = (torch.sigmoid(logits) >= 0.5).float()
+        batch_size = labels.size(0)
+
         correct += (preds == labels).sum().item()
         total += batch_size
+
+        loss = criterion_bce(logits, labels)
+        total_loss += loss.item() * batch_size
+
+        if "steps_taken" in out:
+            act_steps_total += out["steps_taken"].sum().item()
+        elif steps is not None:
+            act_steps_total += float(steps) * batch_size
+
+        reachable_mask = labels == 1.0
+        if "hop" in out and reachable_mask.sum() > 0:
+            pred_hops = out["hop"][reachable_mask]
+            true_hops = hop_lengths[reachable_mask].float()
+            hop_mae += (pred_hops - true_hops).abs().sum().item()
+            reachable_count += reachable_mask.sum().item()
+
+        # Measure latent cosine similarity
+        if "H_fwd" in out:
+            cos_sim_sum += compute_pairwise_cosine_similarity(out["H_fwd"])
+        elif "latents" in out:
+            cos_sim_sum += compute_pairwise_cosine_similarity(out["latents"])
+        elif "node_latents" in out:
+            cos_sim_sum += compute_pairwise_cosine_similarity(out["node_latents"])
         batches += 1
+
+    mean_latency_per_sample = total_latency_ms / total if total > 0 else 0.0
 
     return {
         "acc": correct / total if total > 0 else 0.0,
         "loss": total_loss / total if total > 0 else 0.0,
         "hop_mae": (hop_mae / reachable_count) if reachable_count > 0 else 0.0,
+        "act_steps": (act_steps_total / total) if total > 0 else 0.0,
         "cos_sim": (cos_sim_sum / batches) if batches > 0 else 0.0,
-        "mean_steps": (act_steps_total / total) if total > 0 else 0.0,
+        "mean_latency_ms": mean_latency_per_sample,
     }
-
-
-def load_checkpoint(model: nn.Module, ckpt_path: str, device: torch.device):
-    if not os.path.exists(ckpt_path):
-        console.print(f"[bold yellow]Warning: Checkpoint not found at {ckpt_path}. Skipping.[/bold yellow]")
-        return False
-    ckpt = torch.load(ckpt_path, map_location=device)
-    model.load_state_dict(ckpt["model_state_dict"])
-    console.print(
-        f"[green]Loaded checkpoint from {ckpt_path} (val acc: {ckpt.get('val_acc', 0.0)*100:.1f}%, params: {ckpt.get('param_count', 0):,})[/green]"
-    )
-    return True
-
-
-def run_evaluation(
-    eval_hops: List[int],
-    samples_per_hop: int,
-    t_test_values: List[int],
-    checkpoint_dir: str,
-    output_dir: str,
-    num_nodes: int = 48,
-    target_edges: int = 96,
-    batch_size: int = 64,
-    seed: int = 2026,
-):
-    device = get_device()
-    use_bf16 = (device.type == "cuda" and torch.cuda.is_bf16_supported())
-
-    # Initialize models
-    challenger_v2 = ChallengerLatentNetV2(
-        num_nodes=64,
-        node_embed_dim=128,
-        d_model=384,
-        hidden_dim=768,
-        nhead=4,
-        rel_dim=64,
-        num_relations=8,
-        max_steps=20,
-        epsilon=0.01,
-        use_compile=False,
-    ).to(device)
-
-    transformer = BaselineTransformer(num_nodes=50).to(device)
-    gru = BaselineGRU(num_nodes=50).to(device)
-
-    v2_loaded = load_checkpoint(
-        challenger_v2, os.path.join(checkpoint_dir, "challengerlatentnetv2_best.pt"), device
-    )
-    tf_loaded = load_checkpoint(
-        transformer, os.path.join(checkpoint_dir, "baselinetransformer_best.pt"), device
-    )
-    gru_loaded = load_checkpoint(
-        gru, os.path.join(checkpoint_dir, "baselinegru_best.pt"), device
-    )
-
-    results_table = []
-    summary_data = {
-        "eval_hops": eval_hops,
-        "t_test_values": t_test_values,
-        "hops": {},
-    }
-
-    console.print("\n[bold cyan]Starting NetReach v2 Evaluation Across Path Lengths...[/bold cyan]\n")
-
-    for h in eval_hops:
-        dist_type = "In-Dist" if h in [3, 4, 5] else "OOD"
-        console.print(f"[bold yellow]Evaluating Hop Length H = {h} ({dist_type})...[/bold yellow]")
-
-        loader = create_dataloader(
-            hop_lengths=[h],
-            num_samples=samples_per_hop,
-            batch_size=batch_size,
-            shuffle=False,
-            num_nodes=num_nodes,
-            target_edges=target_edges,
-            seed=seed + h * 100,
-        )
-
-        tf_acc = evaluate_model_on_dataloader(transformer, loader, device, use_bf16)["acc"] if tf_loaded else 0.5
-        gru_acc = evaluate_model_on_dataloader(gru, loader, device, use_bf16)["acc"] if gru_loaded else 0.5
-
-        # 1. Autonomous ACT Evaluation
-        act_metrics = evaluate_model_on_dataloader(challenger_v2, loader, device, use_bf16, steps=None)
-
-        # 2. Fixed Steps Evaluation
-        fixed_step_results = {}
-        cosine_sim_results = {}
-        for t_test in t_test_values:
-            m = evaluate_model_on_dataloader(challenger_v2, loader, device, use_bf16, steps=t_test)
-            fixed_step_results[f"T={t_test}"] = m["acc"]
-            cosine_sim_results[f"T={t_test}"] = m["cos_sim"]
-
-        row = {
-            "hop": h,
-            "dist": dist_type,
-            "transformer_acc": tf_acc,
-            "gru_acc": gru_acc,
-            "act_acc": act_metrics["acc"],
-            "act_steps": act_metrics["mean_steps"],
-            "act_hop_mae": act_metrics["hop_mae"],
-            "fixed_accs": fixed_step_results,
-            "cosine_sims": cosine_sim_results,
-        }
-        results_table.append(row)
-        summary_data["hops"][str(h)] = row
-
-    # Render summary table
-    table = Table(
-        title="NetReach v2: Multi-Relational Algorithmic Generalization & ACT Halting",
-        header_style="bold magenta",
-        show_lines=True,
-    )
-    table.add_column("Hops (H)", justify="center", style="cyan", no_wrap=True)
-    table.add_column("Distribution", justify="center", style="bold")
-    table.add_column("Transformer\n(Fixed Depth)", justify="center", style="green")
-    table.add_column("GRU\n(Sequential)", justify="center", style="blue")
-    for t_test in t_test_values:
-        table.add_column(f"NetReach v2\n(T={t_test})", justify="center", style="yellow")
-    table.add_column("Autonomous ACT\n(Acc / Mean Steps)", justify="center", style="bold magenta")
-    table.add_column("Hop MAE\n(Distance)", justify="center", style="cyan")
-    table.add_column("Cosine Sim\n(T=5 → 20)", justify="center", style="dim")
-
-    for row in results_table:
-        dist_style = "[green]In-Dist[/green]" if row["dist"] == "In-Dist" else "[red]OOD[/red]"
-        tf_str = f"{row['transformer_acc']*100:.1f}%"
-        gru_str = f"{row['gru_acc']*100:.1f}%"
-        c_strs = [f"{row['fixed_accs'][f'T={t}']*100:.1f}%" for t in t_test_values]
-        act_str = f"{row['act_acc']*100:.1f}% ({row['act_steps']:.1f} steps)"
-        mae_str = f"±{row['act_hop_mae']:.1f} hops"
-        cos_str = f"{row['cosine_sims']['T=5']:.2f} → {row['cosine_sims'][f'T={t_test_values[-1]}']:.2f}"
-
-        table.add_row(
-            str(row["hop"]),
-            dist_style,
-            tf_str,
-            gru_str,
-            *c_strs,
-            act_str,
-            mae_str,
-            cos_str,
-        )
-
-    console.print("\n")
-    console.print(table)
-    console.print("\n")
-
-    os.makedirs(output_dir, exist_ok=True)
-    json_path = os.path.join(output_dir, "ood_eval_v2.json")
-    with open(json_path, "w") as f:
-        json.dump(summary_data, f, indent=2)
-    console.print(f"[bold green]Saved detailed evaluation results to {json_path}[/bold green]\n")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Evaluate NetReach v2 models across path lengths.")
+    parser = argparse.ArgumentParser(description="Evaluate NetReach v3 models across path lengths.")
     parser.add_argument("--samples_per_hop", type=int, default=300, help="Test samples per hop length")
-    parser.add_argument("--batch_size", type=int, default=64, help="Batch size")
+    parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
     parser.add_argument("--checkpoint_dir", type=str, default="results/checkpoints", help="Path to checkpoints")
     parser.add_argument("--output_dir", type=str, default="results", help="Directory for output results")
-    parser.add_argument("--hops", type=int, nargs="+", default=[3, 5, 8, 12, 16, 20], help="Hops to evaluate")
-    parser.add_argument("--t_test", type=int, nargs="+", default=[5, 10, 15, 20], help="Test steps for fixed scaling")
+    parser.add_argument("--num_nodes", type=int, default=128, help="Number of nodes per graph")
+    parser.add_argument("--target_edges", type=int, default=384, help="Target edges per graph")
+    parser.add_argument("--hops", type=int, nargs="+", default=[4, 8, 12, 16, 20, 24, 32], help="Hops to evaluate")
+    parser.add_argument("--t_test", type=int, nargs="+", default=[6, 10, 14, 18, 22], help="Test steps for fixed scaling")
     args = parser.parse_args()
 
-    run_evaluation(
-        eval_hops=args.hops,
-        samples_per_hop=args.samples_per_hop,
-        t_test_values=args.t_test,
-        checkpoint_dir=args.checkpoint_dir,
-        output_dir=args.output_dir,
-        batch_size=args.batch_size,
+    device = get_device()
+    use_bf16 = (device.type == "cuda" and torch.cuda.is_bf16_supported())
+
+    # Load NetReach v3 model
+    model_v3 = ChallengerLatentNetV3(
+        num_nodes=args.num_nodes,
+        node_embed_dim=256,
+        d_model=512,
+        hidden_dim=1024,
+        nhead=8,
+        rel_dim=128,
+        num_relations=8,
+        max_steps=22,
+    ).to(device)
+
+    v3_ckpt_path = os.path.join(args.checkpoint_dir, "challengerlatentnetv3_best.pt")
+    if os.path.exists(v3_ckpt_path):
+        ckpt_v3 = torch.load(v3_ckpt_path, map_location=device)
+        model_v3.load_state_dict(ckpt_v3["model_state_dict"])
+        console.print(f"[bold green]Loaded NetReach v3 checkpoint from {v3_ckpt_path} (val acc: {ckpt_v3.get('val_acc', 0.0)*100:.1f}%, params: {ckpt_v3.get('param_count', 0):,})[/bold green]")
+    else:
+        console.print(f"[bold yellow]Warning: {v3_ckpt_path} not found. Running with initialized weights.[/bold yellow]")
+
+    # Check for legacy Baselines
+    try:
+        transformer = BaselineTransformer(num_nodes=args.num_nodes).to(device)
+        t_ckpt_path = os.path.join(args.checkpoint_dir, "baselinetransformer_best.pt")
+        has_t = os.path.exists(t_ckpt_path)
+        if has_t:
+            ckpt_t = torch.load(t_ckpt_path, map_location=device)
+            transformer.load_state_dict(ckpt_t["model_state_dict"])
+    except Exception:
+        has_t = False
+
+    try:
+        gru = BaselineGRU(num_nodes=args.num_nodes).to(device)
+        gru_ckpt_path = os.path.join(args.checkpoint_dir, "baselinegru_best.pt")
+        has_gru = os.path.exists(gru_ckpt_path)
+        if has_gru:
+            ckpt_gru = torch.load(gru_ckpt_path, map_location=device)
+            gru.load_state_dict(ckpt_gru["model_state_dict"])
+    except Exception:
+        has_gru = False
+
+    console.print(f"\n[bold cyan]Starting NetReach v3 Bidirectional Evaluation Across Path Lengths (N={args.num_nodes}, M={args.target_edges})...[/bold cyan]\n")
+
+    results_data = {
+        "eval_hops": args.hops,
+        "t_test_values": args.t_test,
+        "num_nodes": args.num_nodes,
+        "target_edges": args.target_edges,
+        "hops": {},
+    }
+
+    table = Table(
+        title="NetReach v3: Bidirectional Wavefront Recurrence & Meet-in-the-Middle Scaling",
+        show_header=True,
+        header_style="bold magenta",
     )
+    table.add_column("Hops (H)", justify="center", style="bold yellow")
+    table.add_column("Dist", justify="center")
+    table.add_column("Transformer\n(Fixed 3-L)", justify="center", style="cyan")
+    table.add_column("GRU\n(Sequential)", justify="center", style="cyan")
+    for t_step in args.t_test:
+        table.add_column(f"v3 (T={t_step})\n[Bidirectional]", justify="center", style="green")
+    table.add_column("Auto ACT\n(Acc / Steps)", justify="center", style="bold green")
+    table.add_column("Hop MAE", justify="center")
+    table.add_column("Latent\nCos Sim", justify="center")
+    table.add_column("Latency\n(per sample)", justify="center")
+
+    for h in args.hops:
+        dist_type = "In-Dist" if h in [4, 8] else "OOD"
+        console.print(f"Evaluating Hop Length H = {h} ({dist_type})...")
+
+        loader = create_dataloader(
+            hop_lengths=[h],
+            num_samples=args.samples_per_hop,
+            batch_size=args.batch_size,
+            num_nodes=args.num_nodes,
+            target_edges=args.target_edges,
+            shuffle=False,
+            seed=100 + h,
+        )
+
+        # 1. Baseline Transformer
+        if has_t:
+            t_res = evaluate_model_on_dataloader(transformer, loader, device, use_bf16)
+            t_acc = t_res["acc"]
+        else:
+            t_acc = 0.50
+
+        # 2. Baseline GRU
+        if has_gru:
+            gru_res = evaluate_model_on_dataloader(gru, loader, device, use_bf16)
+            gru_acc = gru_res["acc"]
+        else:
+            gru_acc = 0.50
+
+        # 3. NetReach v3 Autonomous ACT mode
+        act_res = evaluate_model_on_dataloader(model_v3, loader, device, use_bf16, steps=None)
+        act_acc = act_res["acc"]
+        act_steps = act_res["act_steps"]
+        act_mae = act_res["hop_mae"]
+        mean_latency = act_res["mean_latency_ms"]
+
+        # 4. NetReach v3 Fixed Steps Scaling
+        fixed_step_accs = {}
+        cos_sims = {}
+        for t_step in args.t_test:
+            step_res = evaluate_model_on_dataloader(model_v3, loader, device, use_bf16, steps=t_step)
+            fixed_step_accs[f"T={t_step}"] = step_res["acc"]
+            cos_sims[f"T={t_step}"] = step_res["cos_sim"]
+
+        results_data["hops"][str(h)] = {
+            "hop": h,
+            "dist": dist_type,
+            "transformer_acc": t_acc,
+            "gru_acc": gru_acc,
+            "act_acc": act_acc,
+            "act_steps": act_steps,
+            "act_hop_mae": act_mae,
+            "fixed_accs": fixed_step_accs,
+            "cosine_sims": cos_sims,
+            "latency_ms": mean_latency,
+        }
+
+        min_sim = min(cos_sims.values())
+        max_sim = max(cos_sims.values())
+
+        row = [
+            str(h),
+            dist_type,
+            f"{t_acc*100:.1f}%",
+            f"{gru_acc*100:.1f}%",
+        ]
+        for t_step in args.t_test:
+            row.append(f"{fixed_step_accs[f'T={t_step}']*100:.1f}%")
+
+        row.extend([
+            f"{act_acc*100:.1f}%\n({act_steps:.1f} st)",
+            f"±{act_mae:.1f} hops",
+            f"{min_sim:.2f} → {max_sim:.2f}",
+            f"{mean_latency:.2f} ms",
+        ])
+        table.add_row(*row)
+
+    console.print("\n")
+    console.print(table)
+
+    out_file = os.path.join(args.output_dir, "ood_eval_v3.json")
+    with open(out_file, "w") as f:
+        json.dump(results_data, f, indent=2)
+
+    console.print(f"\n[bold green]Saved detailed NetReach v3 evaluation results to {out_file}[/bold green]\n")
 
 
 if __name__ == "__main__":

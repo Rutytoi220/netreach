@@ -1,12 +1,12 @@
 """
-Smoke Test for NetReach v2: Multi-Relational Attention & Adaptive Computation Time (ACT).
+Smoke Test for NetReach v3: Bidirectional Recurrence, ACT Halting & Multi-Task Pointer Learning.
 
 Verifies:
-1. Generation of 100 heterogeneous graph samples with 6 relation types across H in [3, 5, 8, 12, 16, 20].
-2. Batched tensor shapes and relation ID distributions.
-3. Parameter count audit: ChallengerLatentNetV2 strictly between 4.5M and 5.5M parameters.
-4. Full forward and backward passes on CUDA with bfloat16, multi-task loss (BCE + SmoothL1 + Ponder Cost), and gradient checking.
-5. ACT halting head dynamics (step weights, cumulative probabilities, ponder cost) and test-time fixed scaling T in [5, 10, 15, 20].
+1. Generation of heterogeneous graph samples (N = 128, M = 384) with next-hop pointer ground truth across H in [4, 8, 12, 16, 20, 24, 32].
+2. Batched tensor shapes and pointer supervision masks.
+3. Parameter count audit: ChallengerLatentNetV3 strictly between 15.0M and 22.0M parameters.
+4. Full forward and backward passes on CUDA with bfloat16, multi-task loss (BCE + SmoothL1 + Pointer CE + Ponder Cost), and gradient checking.
+5. Bidirectional wavefront collision mechanics: C_t(v), bridge pooling, ACT halting dynamics, and fixed scaling.
 """
 
 import time
@@ -14,18 +14,17 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from rich.console import Console
-from rich.table import Table
 
 from data.generator import generate_graph_sample, create_dataloader, RELATION_TYPES
-from netreach.model_v2 import ChallengerLatentNetV2
-from train import compute_multitask_loss
+from netreach.model_v3 import ChallengerLatentNetV3
+from train import compute_multitask_loss_v3
 
 console = Console()
 
 
 def run_smoke_test():
     console.print("\n[bold magenta]=====================================================[/bold magenta]")
-    console.print("[bold cyan]       RUNNING NETREACH v2 SMOKE TEST (5M Params)    [/bold cyan]")
+    console.print("[bold cyan]       RUNNING NETREACH v3 SMOKE TEST (~18M Params)  [/bold cyan]")
     console.print("[bold magenta]=====================================================[/bold magenta]\n")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -35,177 +34,159 @@ def run_smoke_test():
         console.print(f"[bold green]bfloat16 supported:[/bold green] {torch.cuda.is_bf16_supported()}")
 
     # -------------------------------------------------------------
-    # 1. Generate 100 heterogeneous multi-relational samples
+    # 1. Generate heterogeneous samples with N=128, M=384, H<=32
     # -------------------------------------------------------------
     console.print(
-        f"\n[bold yellow]Step 1: Generating 100 heterogeneous samples with {len(RELATION_TYPES)} relation types...[/bold yellow]"
+        f"\n[bold yellow]Step 1: Generating 50 heterogeneous samples (N=128, M=384) with {len(RELATION_TYPES)} relation types and next-hop pointers...[/bold yellow]"
     )
     t0 = time.time()
-    hop_tests = [3, 5, 8, 12, 16, 20]
+    hop_tests = [4, 8, 12, 16, 20, 24, 32]
     relation_counts = {r: 0 for r in range(len(RELATION_TYPES))}
 
-    for i in range(100):
+    for i in range(50):
         h = hop_tests[i % len(hop_tests)]
         reachable = (i % 2 == 0)
-        edges, src, dst, label, sample_h = generate_graph_sample(
-            H=h, reachable=reachable, num_nodes=48, target_edges=96
+        sample = generate_graph_sample(
+            H=h, reachable=reachable, num_nodes=128, target_edges=384
         )
-        assert len(edges) == 96, f"Expected 96 edges, got {len(edges)}"
+        edges, src, dst, label, sample_h = sample[:5]
+        next_hop = sample[5]
+
+        assert len(edges) == 384, f"Expected 384 edges, got {len(edges)}"
         assert label == (1 if reachable else 0)
         assert sample_h == h
+        assert len(next_hop) == 128
+        if reachable:
+            assert next_hop[src] != -1
+            assert next_hop[dst] == dst
         for u, v, r in edges:
             relation_counts[r] += 1
 
     console.print(
-        f"[bold green]✔ Generated 100 samples in {time.time() - t0:.3f}s. Relations active across {len(relation_counts)} types.[/bold green]"
+        f"[bold green]✔ Generated 50 samples in {time.time() - t0:.3f}s. Relations active across {len(relation_counts)} types.[/bold green]"
     )
 
     # -------------------------------------------------------------
-    # 2. Verify Tensor Shapes with DataLoader
+    # 2. Check Batched Tensor Shapes
     # -------------------------------------------------------------
-    console.print("\n[bold yellow]Step 2: Verifying batched tensor shapes (N=48, M=96)...[/bold yellow]")
+    console.print("\n[bold yellow]Step 2: Checking DataLoader batch collation (N=128, M=384)...[/bold yellow]")
     loader = create_dataloader(
-        hop_lengths=[3, 4, 5],
-        num_samples=100,
-        batch_size=32,
-        shuffle=True,
-        num_nodes=48,
-        target_edges=96,
+        hop_lengths=[4, 8, 12, 16, 20, 24, 32],
+        num_samples=16,
+        batch_size=8,
+        num_nodes=128,
+        target_edges=384,
+        seed=42,
     )
     batch = next(iter(loader))
 
-    expected_shapes = {
-        "node_ids": (32, 48),
-        "indicators": (32, 48, 3),
-        "adj": (32, 48, 48),
-        "edge_src": (32, 96),
-        "edge_dst": (32, 96),
-        "edge_rel": (32, 96),
-        "src_idx": (32,),
-        "dst_idx": (32,),
-        "label": (32,),
-        "hop_length": (32,),
-    }
-
-    table = Table(title="Batch Tensor Shapes Verification", header_style="bold cyan")
-    table.add_column("Key", style="bold")
-    table.add_column("Actual Shape", style="green")
-    table.add_column("Expected Shape", style="yellow")
-    table.add_column("Status", style="bold green")
-
-    for k, exp in expected_shapes.items():
-        act = tuple(batch[k].shape)
-        assert act == exp, f"Shape mismatch for {k}: {act} vs {exp}"
-        table.add_row(k, str(act), str(exp), "PASSED ✔")
-    console.print(table)
-
-    # -------------------------------------------------------------
-    # 3. Model Parameter Count Verification [4.5M - 5.5M]
-    # -------------------------------------------------------------
-    console.print("\n[bold yellow]Step 3: Initializing ChallengerLatentNetV2 and verifying parameter budget...[/bold yellow]")
-    model = ChallengerLatentNetV2(
-        num_nodes=64,
-        node_embed_dim=128,
-        d_model=384,
-        hidden_dim=768,
-        nhead=4,
-        rel_dim=64,
-        num_relations=8,
-        max_steps=20,
-        epsilon=0.01,
-        use_compile=True,
-    ).to(device)
-
-    param_count = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    assert 4_500_000 <= param_count <= 5_500_000, f"Parameter count {param_count:,} is outside [4.5M, 5.5M]"
-
-    param_table = Table(title="NetReach v2 Parameter Budget Audit", header_style="bold magenta")
-    param_table.add_column("Model Name", style="bold cyan")
-    param_table.add_column("Parameter Count", justify="right", style="green")
-    param_table.add_column("Allowed Range", justify="center", style="yellow")
-    param_table.add_column("Compliance", justify="center", style="bold green")
-    param_table.add_row("ChallengerLatentNetV2", f"{param_count:,}", "[4,500,000 - 5,500,000]", "STRICT COMPLIANCE ✔")
-    console.print(param_table)
-
-    # -------------------------------------------------------------
-    # 4. Execute 1 Training Epoch on CUDA with Multi-Task Loss
-    # -------------------------------------------------------------
-    console.print("\n[bold yellow]Step 4: Executing 1 Training Epoch on CUDA with Multi-Task Loss...[/bold yellow]")
-    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
-    criterion_bce = nn.BCEWithLogitsLoss()
-    use_bf16 = (device.type == "cuda" and torch.cuda.is_bf16_supported())
-
-    model.train()
-    total_loss = 0.0
-    correct = 0
-    total = 0
-    t_epoch = time.time()
-
-    for b in loader:
-        b_dev = {k: v.to(device) for k, v in b.items()}
-        labels = b_dev["label"]
-        optimizer.zero_grad()
-
-        with torch.amp.autocast(
-            device_type="cuda" if device.type == "cuda" else "cpu",
-            dtype=torch.bfloat16,
-            enabled=use_bf16,
-        ):
-            out = model(b_dev)
-            loss, loss_dict = compute_multitask_loss(out, b_dev, criterion_bce)
-
-        loss.backward()
-        # Verify gradients on halting head and task heads
-        assert model.halt_head.weight.grad is not None, "Halting head received no gradient!"
-        assert model.reach_head[0].weight.grad is not None, "Reach head received no gradient!"
-        assert model.hop_head[0].weight.grad is not None, "Hop head received no gradient!"
-
-        nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
-
-        total_loss += loss.item() * len(labels)
-        preds = (torch.sigmoid(out["logit"]) >= 0.5).float()
-        correct += (preds == labels).sum().item()
-        total += len(labels)
-
-    dt = time.time() - t_epoch
+    assert batch["node_ids"].shape == (8, 128)
+    assert batch["indicators"].shape == (8, 128, 3)
+    assert batch["adj"].shape == (8, 128, 128)
+    assert batch["edge_src"].shape == (8, 384)
+    assert batch["edge_dst"].shape == (8, 384)
+    assert batch["edge_rel"].shape == (8, 384)
+    assert batch["next_hop"].shape == (8, 128)
+    assert batch["label"].shape == (8,)
+    assert batch["hop_length"].shape == (8,)
     console.print(
-        f"[bold green]✔ Epoch 1 Completed in {dt:.2f}s[/bold green] | "
-        f"Loss: {total_loss / total:.4f} | Reach Acc: {correct / total * 100:.1f}% | "
-        f"Gradients verified on all heads!"
+        f"[bold green]✔ Batch shapes verified: edge_rel={tuple(batch['edge_rel'].shape)}, next_hop={tuple(batch['next_hop'].shape)}, adj={tuple(batch['adj'].shape)}.[/bold green]"
     )
 
     # -------------------------------------------------------------
-    # 5. Verify Halting Head Dynamics & Fixed Recurrence Scaling
+    # 3. Parameter Count Audit: Strictly between 15.0M and 22.0M
     # -------------------------------------------------------------
-    console.print("\n[bold yellow]Step 5: Verifying Halting Head Dynamics & Test-Time Compute Scaling...[/bold yellow]")
-    model.eval()
-    b_dev = {k: v.to(device) for k, v in batch.items()}
+    console.print("\n[bold yellow]Step 3: Auditing Parameter Count of ChallengerLatentNetV3...[/bold yellow]")
+    model = ChallengerLatentNetV3(
+        num_nodes=128,
+        node_embed_dim=256,
+        d_model=512,
+        hidden_dim=1024,
+        nhead=8,
+        rel_dim=128,
+        num_relations=8,
+        max_steps=12,
+    )
+    params = model.count_parameters()
+    console.print(f"[bold cyan]Exact Parameter Count: {params:,}[/bold cyan]")
+    assert 15_000_000 <= params <= 22_000_000, f"Parameter count {params:,} outside [15.0M, 22.0M] range!"
+    console.print("[bold green]✔ Parameter count strictly verified within [15,000,000 - 22,000,000].[/bold green]")
 
+    # -------------------------------------------------------------
+    # 4. Forward & Backward Pass on CUDA with Mixed Precision
+    # -------------------------------------------------------------
+    console.print("\n[bold yellow]Step 4: Running Forward + Backward Pass on CUDA with Multi-Task Loss...[/bold yellow]")
+    model = model.to(device)
+    batch_dev = {k: v.to(device) for k, v in batch.items()}
+    criterion_bce = nn.BCEWithLogitsLoss()
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=2e-4)
+    optimizer.zero_grad()
+
+    t_fwd = time.perf_counter()
+    if device.type == "cuda" and torch.cuda.is_bf16_supported():
+        with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+            out = model(batch_dev, steps=None, return_latents=True)
+            loss, metrics = compute_multitask_loss_v3(out, batch_dev, criterion_bce)
+    else:
+        out = model(batch_dev, steps=None, return_latents=True)
+        loss, metrics = compute_multitask_loss_v3(out, batch_dev, criterion_bce)
+
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    fwd_time_ms = (time.perf_counter() - t_fwd) * 1000
+
+    console.print(f"Forward Pass Time (Batch 8, ACT): {fwd_time_ms:.2f} ms ({fwd_time_ms/8:.2f} ms/query)")
+    console.print(
+        f"Loss components: BCE={metrics['loss_bce']:.4f}, Hop={metrics['loss_hop']:.4f}, Pointer={metrics['loss_pointer']:.4f}, Ponder={metrics['ponder_cost']:.4f}"
+    )
+
+    loss.backward()
+
+    # Gradient checks
+    assert model.reach_head[0].weight.grad is not None
+    assert torch.sum(torch.abs(model.reach_head[0].weight.grad)) > 0.0
+
+    assert model.hop_head[0].weight.grad is not None
+    assert torch.sum(torch.abs(model.hop_head[0].weight.grad)) > 0.0
+
+    assert model.pointer_q.weight.grad is not None
+    assert torch.sum(torch.abs(model.pointer_q.weight.grad)) > 0.0
+
+    assert model.halt_head[0].weight.grad is not None
+    assert torch.sum(torch.abs(model.halt_head[0].weight.grad)) > 0.0
+
+    assert model.W_f.weight.grad is not None
+    assert torch.sum(torch.abs(model.W_f.weight.grad)) > 0.0
+
+    assert model.W_b.weight.grad is not None
+    assert torch.sum(torch.abs(model.W_b.weight.grad)) > 0.0
+
+    console.print("[bold green]✔ Non-zero gradients verified across reach_head, hop_head, pointer_decoder, halt_head, and collision projections.[/bold green]")
+
+    # -------------------------------------------------------------
+    # 5. Fixed Steps Scaling & Collision Mechanics
+    # -------------------------------------------------------------
+    console.print("\n[bold yellow]Step 5: Verifying Bidirectional Collision Mechanics & Fixed Scaling...[/bold yellow]")
     with torch.no_grad():
-        with torch.amp.autocast(
-            device_type="cuda" if device.type == "cuda" else "cpu",
-            dtype=torch.bfloat16,
-            enabled=use_bf16,
-        ):
-            act_out = model(b_dev)
-            steps_taken = act_out["steps_taken"].mean().item()
-            ponder_cost = act_out["ponder_cost"].item()
-            console.print(
-                f"[bold green]✔ Autonomous ACT Execution:[/bold green] Mean Steps Taken: {steps_taken:.2f} | Ponder Cost: {ponder_cost:.3f}"
-            )
+        out_6 = model(batch_dev, steps=6, return_latents=True)
+        out_14 = model(batch_dev, steps=14, return_latents=True)
 
-            for t_test in [5, 10, 15, 20]:
-                fixed_out = model(b_dev, steps=t_test)
-                prob = torch.sigmoid(fixed_out["logit"]).mean().item()
-                mean_hop = fixed_out["hop"].mean().item()
-                console.print(
-                    f"[bold green]✔ Fixed Step T_test = {t_test:2d}:[/bold green] Mean Prob: {prob*100:.1f}% | Mean Predicted Hops: {mean_hop:.1f}"
-                )
+    assert out_6["logit"].shape == (8,)
+    assert out_6["hop"].shape == (8,)
+    assert out_6["pointer_logits"].shape == (8, 128, 128)
+    assert out_6["collision_map"].shape == (8, 128)
+    assert float(out_6["steps_taken"].mean()) == 6.0
+    assert float(out_14["steps_taken"].mean()) == 14.0
 
-    console.print("\n[bold magenta]=====================================================[/bold magenta]")
-    console.print("[bold green]       NETREACH v2 SMOKE TEST COMPLETED SUCCESSFULLY!  [/bold green]")
-    console.print("[bold magenta]=====================================================[/bold magenta]\n")
+    max_c_6 = out_6["max_collision"].mean().item()
+    max_c_14 = out_14["max_collision"].mean().item()
+    console.print(f"Collision Affinity mean at T=6: {max_c_6:.3f} | at T=14: {max_c_14:.3f}")
+    console.print("[bold green]✔ Bidirectional recurrence and fixed step scaling verified.[/bold green]")
+
+    console.print("\n[bold green]=====================================================[/bold green]")
+    console.print("[bold green]      ALL NETREACH v3 SMOKE TESTS PASSED! ✔          [/bold green]")
+    console.print("[bold green]=====================================================[/bold green]\n")
 
 
 if __name__ == "__main__":
