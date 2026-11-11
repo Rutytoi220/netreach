@@ -1,8 +1,9 @@
 """
-Command-Line Interface for NetReach v0.5.0.
+Command-Line Interface for NetReach v0.6.0.
 
 Commands:
 - netreach audit: Audit lateral movement reachability and neural path trace across recurrent steps T.
+- netreach harden: Identify critical attack corridor chokepoints and generate actionable remediations.
 - netreach benchmark: Run automated latency, parameter audit, and accuracy benchmarks.
 """
 
@@ -17,6 +18,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from netreach.engine import NetReachEngine
+from netreach.remediation import generate_markdown_report
 
 console = Console()
 
@@ -24,7 +26,7 @@ console = Console()
 def print_banner():
     banner = Text()
     banner.append("⚡ NetReach ", style="bold cyan")
-    banner.append("v0.5.0 — Enterprise Neural Attack Path & Lateral Movement Engine\n", style="bold white")
+    banner.append("v0.6.0 — Enterprise Neural Attack Path & Remediation Engine\n", style="bold white")
     banner.append("Powered by Bidirectional Recurrent Latent Scaling (38M Params, INT8 Optimized)", style="dim")
     console.print(Panel(banner, border_style="cyan"))
 
@@ -246,6 +248,148 @@ def cmd_benchmark(args):
     console.print("\n[bold green]✔ Benchmark completed successfully.[/bold green]\n")
 
 
+def cmd_harden(args):
+    """Execute chokepoint analysis and generate remediations via neural edge ablation."""
+    if not args.json:
+        print_banner()
+
+    try:
+        if not args.json:
+            with console.status("[bold green]Loading neural reachability engine (v4 38M)..."):
+                engine = NetReachEngine(
+                    checkpoint_path=args.checkpoint,
+                    device=args.device,
+                    use_int8=args.int8,
+                )
+            with console.status(f"[bold yellow]Performing neural edge ablation between '{args.src}' and '{args.dst}'..."):
+                result = engine.harden(
+                    graph_source=args.graph,
+                    source=args.src,
+                    target=args.dst,
+                    top_k=args.top_k,
+                    steps=args.depth,
+                )
+        else:
+            engine = NetReachEngine(
+                checkpoint_path=args.checkpoint,
+                device=args.device,
+                use_int8=args.int8,
+            )
+            result = engine.harden(
+                graph_source=args.graph,
+                source=args.src,
+                target=args.dst,
+                top_k=args.top_k,
+                steps=args.depth,
+            )
+    except Exception as e:
+        console.print(f"[bold red]Harden Error:[/bold red] {e}")
+        sys.exit(1)
+
+    if args.json:
+        data = {
+            "source": result.source,
+            "target": result.target,
+            "baseline_risk_level": result.baseline_risk_level,
+            "baseline_probability": round(result.baseline_probability, 4),
+            "act_steps": round(result.act_steps, 2),
+            "bridge_node": result.bridge_node,
+            "attack_path": result.attack_path,
+            "path_relations": result.path_relations,
+            "analysis_latency_ms": round(result.analysis_latency_ms, 2),
+            "subgraph_nodes": result.subgraph_nodes,
+            "subgraph_edges": result.subgraph_edges,
+            "chokepoints": [
+                {
+                    "rank": cp.rank,
+                    "source": cp.source,
+                    "target": cp.target,
+                    "relation": cp.relation,
+                    "ad_relation": cp.ad_relation,
+                    "baseline_prob": round(cp.baseline_prob, 4),
+                    "ablated_prob": round(cp.ablated_prob, 4),
+                    "delta_p": round(cp.delta_p, 4),
+                    "mitigation_cmd": cp.mitigation_cmd,
+                    "cypher_query": cp.cypher_query,
+                    "description": cp.description,
+                }
+                for cp in result.chokepoints
+            ],
+        }
+        print(json.dumps(data, indent=2))
+        if args.export:
+            md_content = generate_markdown_report(result)
+            with open(args.export, "w", encoding="utf-8") as f:
+                f.write(md_content)
+        return
+
+    # Visual Rich Presentation
+    console.print(f"\n[bold white]Source Asset:[/bold white] [bold cyan]{result.source}[/bold cyan]")
+    console.print(f"[bold white]Target Asset:[/bold white] [bold red]{result.target}[/bold red]")
+    mode_str = "INT8 Quantized CPU" if engine.use_int8 else f"{engine.device}"
+    console.print(
+        f"[dim]Corridor Subgraph: {result.subgraph_nodes} nodes, {result.subgraph_edges} edges | "
+        f"Ablation Latency: {result.analysis_latency_ms:.2f} ms ({mode_str}, {engine.param_count:,} params)[/dim]\n"
+    )
+
+    # Discovered Attack Path Display
+    if result.path_relations:
+        console.print(Panel(
+            Text(f"Detected Lateral Movement Corridor ({len(result.path_relations)} Hops)", style="bold yellow"),
+            border_style="yellow",
+        ))
+        for i, edge in enumerate(result.path_relations, 1):
+            rel = edge.get("ad_relation", edge.get("relation", "AdminTo"))
+            console.print(f"  [dim]{i}.[/dim] [bold cyan]{edge['source']}[/bold cyan] ──([magenta]{rel}[/magenta])──► [bold green]{edge['target']}[/bold green]")
+        console.print()
+
+    # Chokepoints Table
+    if not result.chokepoints:
+        console.print("[bold yellow]No critical chokepoints found along this path.[/bold yellow]\n")
+    else:
+        table = Table(
+            title="Top Defensive Chokepoints (Ranked by ΔP Reachability Collapse)",
+            header_style="bold magenta",
+        )
+        table.add_column("Rank", justify="center", style="bold white", width=6)
+        table.add_column("Chokepoint Edge", style="bold cyan")
+        table.add_column("Relation", justify="center", style="magenta")
+        table.add_column("Ablated Reachability", justify="right", style="yellow")
+        table.add_column("Impact (ΔP)", justify="right", style="bold green")
+        table.add_column("Remediation Action", style="white")
+
+        for cp in result.chokepoints:
+            edge_str = f"{cp.source} -> {cp.target}"
+            impact_str = f"{cp.delta_p * 100:+.1f}%"
+            ablated_str = f"{cp.ablated_prob * 100:.1f}%"
+            table.add_row(f"#{cp.rank}", edge_str, cp.ad_relation, ablated_str, impact_str, cp.description)
+
+        console.print(table)
+        console.print()
+
+        # Detailed Remediation Playbook Panel for Top 1
+        top_cp = result.chokepoints[0]
+        rec_text = Text()
+        rec_text.append("Recommended Single Action to Break Attack Path:\n", style="bold underline yellow")
+        rec_text.append("Sever edge: ", style="bold")
+        rec_text.append(f"[{top_cp.source}] --({top_cp.ad_relation})--> [{top_cp.target}]\n", style="bold cyan")
+        rec_text.append("Reachability Drops: ", style="bold")
+        rec_text.append(f"{top_cp.baseline_prob * 100:.1f}% ➔ {top_cp.ablated_prob * 100:.1f}% ({top_cp.delta_p * 100:+.1f}% collapse)\n\n", style="bold green")
+        rec_text.append("PowerShell Mitigation:\n", style="bold magenta")
+        rec_text.append(f"{top_cp.mitigation_cmd}\n\n", style="dim")
+        rec_text.append("BloodHound / Cypher Simulation Query:\n", style="bold magenta")
+        rec_text.append(f"{top_cp.cypher_query}", style="dim")
+
+        console.print(Panel(rec_text, title="🛡️ Top Priority Remediation", border_style="green"))
+
+    # Export markdown report if requested
+    if args.export:
+        md_content = generate_markdown_report(result)
+        with open(args.export, "w", encoding="utf-8") as f:
+            f.write(md_content)
+        console.print(f"\n[bold green]✔ Detailed remediation report exported to '{args.export}'[/bold green]\n")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="netreach",
@@ -264,6 +408,19 @@ def main():
     audit_parser.add_argument("--int8", action="store_true", help="Enable dynamic INT8 quantization for fast CPU inference.")
     audit_parser.add_argument("--json", action="store_true", help="Output raw JSON results.")
 
+    # 'harden' command
+    harden_parser = subparsers.add_parser("harden", help="Identify critical attack corridor chokepoints and generate remediations.")
+    harden_parser.add_argument("--graph", "-g", type=str, required=True, help="Path to graph file (JSON, GraphML, DOT).")
+    harden_parser.add_argument("--src", "-s", type=str, required=True, help="Source entity (e.g., Workstation-01).")
+    harden_parser.add_argument("--dst", "-d", type=str, required=True, help="Target entity (e.g., Domain-Controller).")
+    harden_parser.add_argument("--depth", type=int, default=None, help="Recurrent evaluation steps T.")
+    harden_parser.add_argument("--export", "-e", type=str, default=None, help="Path to export Markdown report.")
+    harden_parser.add_argument("--top-k", "-k", type=int, default=3, help="Number of highest-impact chokepoints to return.")
+    harden_parser.add_argument("--device", type=str, default=None, help="Force device ('cpu' or 'cuda').")
+    harden_parser.add_argument("--checkpoint", type=str, default=None, help="Custom weights file path.")
+    harden_parser.add_argument("--int8", action="store_true", help="Enable dynamic INT8 quantization for fast CPU inference.")
+    harden_parser.add_argument("--json", action="store_true", help="Output raw JSON results.")
+
     # 'benchmark' command
     bench_parser = subparsers.add_parser("benchmark", help="Run latency and accuracy benchmark.")
     bench_parser.add_argument("--samples", type=int, default=16, help="Number of benchmark samples.")
@@ -276,6 +433,8 @@ def main():
 
     if args.command == "audit":
         cmd_audit(args)
+    elif args.command == "harden":
+        cmd_harden(args)
     elif args.command == "benchmark":
         cmd_benchmark(args)
 

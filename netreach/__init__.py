@@ -15,9 +15,16 @@ from netreach.adapters.bloodhound import (
     normalize_ad_relation,
     AD_RELATION_MAP,
 )
+from netreach.remediation import (
+    Chokepoint,
+    HardenResult,
+    find_critical_chokepoints,
+    generate_remediation_commands,
+    generate_markdown_report,
+)
 from netreach.export import quantize_model_for_cpu, export_quantized_checkpoint
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 __all__ = [
     "NetReachEngine",
@@ -35,6 +42,11 @@ __all__ = [
     "parse_bloodhound_data",
     "normalize_ad_relation",
     "AD_RELATION_MAP",
+    "Chokepoint",
+    "HardenResult",
+    "find_critical_chokepoints",
+    "generate_remediation_commands",
+    "generate_markdown_report",
     "quantize_model_for_cpu",
     "export_quantized_checkpoint",
     "__version__",

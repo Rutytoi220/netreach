@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11"]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+
+      - name: Install CPU PyTorch
+        run: |
+          pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install NetReach and dependencies
+        run: |
+          pip install -e .[dev]
+
+      - name: Run Test Suite
+        run: |
+          pytest tests/ -v
+
+      - name: Run CLI Audit Verification
+        run: |
+          netreach audit --graph examples/bloodhound_enterprise.json --src "WORKSTATION-01.CORP.LOCAL" --dst "DC01.CORP.LOCAL" --int8
+
+      - name: Run CLI Chokepoint Remediation Verification
+        run: |
+          netreach harden --graph examples/bloodhound_enterprise.json --src "WORKSTATION-01.CORP.LOCAL" --dst "DC01.CORP.LOCAL" --int8 --export ci_remediation_report.md
+          test -f ci_remediation_report.md
+
+      - name: Run CLI Benchmark Verification
+        run: |
+          netreach benchmark --samples 4 --int8

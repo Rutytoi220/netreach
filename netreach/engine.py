@@ -1,9 +1,9 @@
 """
-High-Level Inference Engine for NetReach v0.5.0.
+High-Level Inference Engine for NetReach v0.6.0.
 
 Provides zero-dependency neural reachability auditing, neural attack path tracing,
-and latency benchmarking with automatic CUDA acceleration, graceful CPU fallback,
-and optional INT8 dynamic quantization for ultra-fast CPU inference.
+automated chokepoint analysis & remediation, and latency benchmarking with automatic
+CUDA acceleration, graceful CPU fallback, and optional INT8 dynamic quantization.
 """
 
 import os
@@ -391,3 +391,35 @@ class NetReachEngine:
             "accuracy_summary": accuracy_summary,
             "tested_samples": sum(hop_counts.values()),
         }
+
+    def harden(
+        self,
+        graph_source: Union[str, nx.DiGraph, List[Dict[str, Any]], Dict[str, Any]],
+        source: str,
+        target: str,
+        top_k: int = 3,
+        steps: Optional[int] = None,
+    ):
+        """
+        Identify critical attack corridor chokepoints and generate actionable remediations
+        via fast neural edge ablation.
+
+        Args:
+            graph_source: Path to graph or networkx DiGraph.
+            source: Attacker entry principal/node.
+            target: High-value objective asset.
+            top_k: Number of highest-impact chokepoints to return.
+            steps: Recurrent evaluation steps T (defaults to ACT steps or 8).
+
+        Returns:
+            HardenResult with baseline telemetry, ranked chokepoint edges, and mitigation scripts.
+        """
+        from netreach.remediation import find_critical_chokepoints
+        return find_critical_chokepoints(
+            graph_source=graph_source,
+            src=source,
+            dst=target,
+            top_k=top_k,
+            engine=self,
+            steps=steps,
+        )

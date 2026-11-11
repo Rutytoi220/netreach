@@ -1,16 +1,42 @@
-# NetReach ⚡ v4: Momentum Wavefront Recurrence & Neural Path Tracing
+# NetReach ⚡ v0.6.0: Enterprise Neural Attack Path & Remediation Engine
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.2%2B-ee4c2c.svg)](https://pytorch.org/)
 [![Parameters](https://img.shields.io/badge/Parameters-38.04M-brightgreen.svg)](#parameter-budget)
-[![Tests](https://img.shields.io/badge/Tests-33%2F33%20Passing-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/Tests-50%2F50%20Passing-brightgreen.svg)](tests/)
 
-**NetReach v4** is an enterprise neural graph engine for deep attack path reachability, multi-relational network path reasoning, and lateral movement analysis. NetReach v4 breaks through the 32-hop barrier on massive enterprise topologies ($N = 256, M = 768, H \le 40$) using **Momentum Wavefront Recurrence**, **Collision Peak Halting**, and **Complete Neural Path Tracing (Pointer Beam Search)**.
+**NetReach v0.6.0** is an enterprise neural graph engine for deep attack path reachability, multi-relational network path reasoning, and **Automated Chokepoint Remediation (`netreach harden`)**. NetReach v0.6.0 breaks through the 32-hop barrier on massive enterprise topologies ($N = 256, M = 768, H \le 40$) using **Momentum Wavefront Recurrence**, **Collision Peak Halting**, **Pointer Beam Search**, and **Fast Neural Edge Ablation**.
 
 ---
 
-## Core Breakthroughs in NetReach v4
+## What's New in NetReach v0.6.0: Automated Chokepoint Remediation (`netreach harden`)
+
+Attack path discovery is only half the battle; security engineering teams need to know **which single permission or credential to revoke to break the attack chain** with minimal disruption to operations.
+
+NetReach v0.6.0 introduces:
+1. **Fast Neural Edge Ablation:** For each candidate edge $e_{uv}$ in the discovered lateral movement corridor, NetReach ablates the edge and computes the reachability drop:
+   $$\Delta P(e_{uv}) = P_{\text{baseline}}(\text{reach}) - P_{\text{ablated}}(\text{reach})$$
+2. **Critical Chokepoint Ranking:** Edges are automatically ranked by $\Delta P$ to pinpoint the high-leverage bottlenecks where removing 1 permission collapses reachability from $>90\%$ to $<1\%$.
+3. **Actionable Remediation Generation:** Automatically synthesizes:
+   - **Active Directory PowerShell Scripts:** Precise cmdlets (e.g., `Remove-LocalGroupMember`, `Remove-ADGroupMember`, `Protected Users` enrollment, DACL revocation, disabling delegation).
+   - **Host-Based Firewall Rules & Microsegmentation:** Inbound block rules and router ACL guidance.
+   - **BloodHound / Neo4j Cypher Queries:** Simulation queries to immediately sever the edge in visual graph databases.
+4. **Executive Markdown Report Export:** Use `--export report.md` to produce executive audit summaries and technical runbooks.
+
+### Quick Example: Hardening an Enterprise AD Domain
+
+```bash
+netreach harden \
+  --graph examples/bloodhound_enterprise.json \
+  --src "WORKSTATION-01.CORP.LOCAL" \
+  --dst "DC01.CORP.LOCAL" \
+  --export remediation_report.md
+```
+
+---
+
+## Core Breakthroughs in NetReach v4 / v0.6.0
 
 ### 1. Momentum Wavefront Recurrence
 In branchy topologies ($N=256, M=768$), wavefronts risk dispersion across dead-end subtrees. NetReach v4 introduces latent momentum buffers ($V^{(fwd)}_t, V^{(bwd)}_t$) to both forward and backward message-passing streams:
@@ -125,27 +151,72 @@ pip install -e .
 pytest tests/ -v
 ```
 
-## Running an Attack Path Audit
+## CLI Usage & Commands
+
+### 1. `netreach audit`
+Audit lateral movement reachability and reconstruct the step-by-step attack path:
+```bash
+# Standard audit with Rich visual terminal rendering
+netreach audit --graph examples/bloodhound_enterprise.json --src "WORKSTATION-01.CORP.LOCAL" --dst "DC01.CORP.LOCAL"
+
+# Fast CPU inference with INT8 quantization
+netreach audit --graph examples/bloodhound_enterprise.json --src "WORKSTATION-01.CORP.LOCAL" --dst "DC01.CORP.LOCAL" --int8
+
+# JSON output for automated SIEM / SOAR pipeline integration
+netreach audit --graph examples/bloodhound_enterprise.json --src "WORKSTATION-01.CORP.LOCAL" --dst "DC01.CORP.LOCAL" --json
+```
+
+### 2. `netreach harden`
+Identify critical corridor chokepoints and generate tailored PowerShell, host firewall, and BloodHound Cypher remediations:
+```bash
+# Run chokepoint analysis and export executive Markdown report
+netreach harden \
+  --graph examples/bloodhound_enterprise.json \
+  --src "WORKSTATION-01.CORP.LOCAL" \
+  --dst "DC01.CORP.LOCAL" \
+  --top-k 3 \
+  --export remediation_report.md
+
+# Output JSON with ranked chokepoints and mitigation scripts
+netreach harden --graph examples/bloodhound_enterprise.json --src "WORKSTATION-01.CORP.LOCAL" --dst "DC01.CORP.LOCAL" --json
+```
+
+### 3. `netreach benchmark`
+Run automated compute latency, parameter audit, and multi-hop accuracy benchmarks:
+```bash
+netreach benchmark --samples 16
+```
+
+---
+
+## Python API Usage
 
 ```python
-import torch
-from netreach.model_v4 import ChallengerLatentNetV4
-from data.generator import create_dataloader
+from netreach import NetReachEngine
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = ChallengerLatentNetV4(num_nodes=256).to(device)
+# Initialize engine (defaults to CUDA if available, with graceful CPU fallback and INT8 support)
+engine = NetReachEngine()
 
-# Load checkpoint
-ckpt = torch.load("results/checkpoints/challengerlatentnetv4_best.pt", map_location=device)
-model.load_state_dict(ckpt["model_state_dict"])
-model.eval()
+# 1. Audit Lateral Movement Reachability
+audit_res = engine.audit(
+    graph_source="examples/bloodhound_enterprise.json",
+    source="WORKSTATION-01.CORP.LOCAL",
+    target="DC01.CORP.LOCAL",
+    depths=(4, 8, 12, 16),
+)
+print("Risk Level:", audit_res.risk_level)
+print("Collision Bridge Node:", audit_res.bridge_node)
+print("Reconstructed Path:", " -> ".join(audit_res.neural_path))
 
-# Trace an attack path from bridge node
-loader = create_dataloader(hop_lengths=[12], num_samples=1, batch_size=1, num_nodes=256, target_edges=768)
-batch = {k: v.to(device) for k, v in next(iter(loader)).items()}
-
-trace = model.trace_attack_path(batch, sample_idx=0, max_steps=32)
-print("Bridge Node:", trace["bridge_node"])
-print("Traced Path:", trace["path"])
-print("Is Valid Graph Walk:", trace["is_valid_walk"])
+# 2. Automated Chokepoint Analysis & Remediation
+harden_res = engine.harden(
+    graph_source="examples/bloodhound_enterprise.json",
+    source="WORKSTATION-01.CORP.LOCAL",
+    target="DC01.CORP.LOCAL",
+    top_k=3,
+)
+for cp in harden_res.chokepoints:
+    print(f"Priority #{cp.rank}: Sever {cp.source} -> {cp.target} ({cp.ad_relation})")
+    print(f"  Collapse: {cp.baseline_prob*100:.1f}% -> {cp.ablated_prob*100:.1f}% (ΔP: {cp.delta_p*100:+.1f}%)")
+    print(f"  PowerShell: {cp.mitigation_cmd}")
 ```
