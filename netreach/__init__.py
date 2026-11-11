@@ -22,9 +22,16 @@ from netreach.remediation import (
     generate_remediation_commands,
     generate_markdown_report,
 )
+from netreach.adapters.cloud_iam import (
+    load_cloud_iam_graph,
+    parse_cloud_iam_data,
+    normalize_cloud_relation,
+    CLOUD_RELATION_MAP,
+)
+from netreach.visualizer import generate_corridor_visualization
 from netreach.export import quantize_model_for_cpu, export_quantized_checkpoint
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 __all__ = [
     "NetReachEngine",
@@ -42,11 +49,16 @@ __all__ = [
     "parse_bloodhound_data",
     "normalize_ad_relation",
     "AD_RELATION_MAP",
+    "load_cloud_iam_graph",
+    "parse_cloud_iam_data",
+    "normalize_cloud_relation",
+    "CLOUD_RELATION_MAP",
     "Chokepoint",
     "HardenResult",
     "find_critical_chokepoints",
     "generate_remediation_commands",
     "generate_markdown_report",
+    "generate_corridor_visualization",
     "quantize_model_for_cpu",
     "export_quantized_checkpoint",
     "__version__",

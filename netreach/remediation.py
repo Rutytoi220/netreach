@@ -67,7 +67,65 @@ def generate_remediation_commands(
     ad_rel_lower = ad_rel_clean.lower()
     canon_lower = canon_rel.lower()
 
-    if canon_lower == "memberof":
+    # Cloud IAM specific relation handlers (AWS & Azure / Entra ID)
+    if "assumerole" in ad_rel_lower:
+        ps_cmd = (
+            f'# AWS IAM: Sever sts:AssumeRole trust relationship from {source} to {target}\n'
+            f'aws iam update-assume-role-policy --role-name "{target}" '
+            f'--policy-document \'{{"Version":"2012-10-17","Statement":[]}}\''
+        )
+        cypher = f'MATCH (u {{name: "{source}"}})-[r:AssumeRole]->(t {{name: "{target}"}}) DELETE r'
+        desc = f"Update AWS IAM role trust policy on '{target}' to revoke sts:AssumeRole permissions from '{source}'."
+
+    elif "passrole" in ad_rel_lower:
+        ps_cmd = (
+            f'# AWS IAM: Remove iam:PassRole permission from {source} targeting {target}\n'
+            f'aws iam delete-role-policy --role-name "{source}" --policy-name "PassRole_{target}"'
+        )
+        cypher = f'MATCH (u {{name: "{source}"}})-[r:PassRole]->(t {{name: "{target}"}}) DELETE r'
+        desc = f"Revoke iam:PassRole delegation rights on principal '{source}' for target service role '{target}'."
+
+    elif "attachedpolicy" in ad_rel_lower:
+        ps_cmd = (
+            f'# AWS IAM: Detach policy {target} from principal {source}\n'
+            f'aws iam detach-role-policy --role-name "{source}" --policy-arn "{target}"'
+        )
+        cypher = f'MATCH (u {{name: "{source}"}})-[r:AttachedPolicy]->(p {{name: "{target}"}}) DELETE r'
+        desc = f"Detach administrative managed policy '{target}' from AWS principal '{source}'."
+
+    elif "federateto" in ad_rel_lower:
+        ps_cmd = (
+            f'# AWS/Entra: Revoke identity federation trust provider {target}\n'
+            f'aws iam delete-saml-provider --saml-provider-arn "{target}"'
+        )
+        cypher = f'MATCH (u {{name: "{source}"}})-[r:FederateTo]->(t {{name: "{target}"}}) DELETE r'
+        desc = f"Sever SAML/OIDC identity federation trust between '{source}' and target provider '{target}'."
+
+    elif "azroleassignment" in ad_rel_lower:
+        ps_cmd = (
+            f'# Azure / Entra ID: Remove RBAC role assignment\n'
+            f'az role assignment delete --assignee "{source}" --scope "{target}"'
+        )
+        cypher = f'MATCH (u {{name: "{source}"}})-[r:AZRoleAssignment]->(t {{name: "{target}"}}) DELETE r'
+        desc = f"Revoke Azure RBAC role assignment granting principal '{source}' administrative rights on scope '{target}'."
+
+    elif any(k in ad_rel_lower for k in ["azappadmin", "azowns"]):
+        ps_cmd = (
+            f'# Azure / Entra ID: Remove Application Administrator / Owner rights\n'
+            f'az ad app owner remove --id "{target}" --owner-object-id "{source}"'
+        )
+        cypher = f'MATCH (u {{name: "{source}"}})-[r:AZAppAdmin]->(t {{name: "{target}"}}) DELETE r'
+        desc = f"Remove principal '{source}' from Application Administrator ownership for '{target}'."
+
+    elif "azaddmembers" in ad_rel_lower:
+        ps_cmd = (
+            f'# Azure / Entra ID: Remove member from security group\n'
+            f'az ad group member remove --group "{target}" --member-id "{source}"'
+        )
+        cypher = f'MATCH (u {{name: "{source}"}})-[r:AZAddMembers]->(t {{name: "{target}"}}) DELETE r'
+        desc = f"Revoke group membership or member addition rights for '{source}' on group '{target}'."
+
+    elif canon_lower == "memberof":
         ps_cmd = f'Remove-ADGroupMember -Identity "{target}" -Members "{source}" -Confirm:$false'
         cypher = f'MATCH (u {{name: "{source}"}})-[r:MemberOf]->(g {{name: "{target}"}}) DELETE r'
         desc = f"Revoke active group membership of principal '{source}' from security group '{target}'."

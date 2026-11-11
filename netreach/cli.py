@@ -1,12 +1,15 @@
 """
-Command-Line Interface for NetReach v0.6.0.
+Command-Line Interface for NetReach v0.7.0.
 
 Commands:
 - netreach audit: Audit lateral movement reachability and neural path trace across recurrent steps T.
 - netreach harden: Identify critical attack corridor chokepoints and generate actionable remediations.
+- netreach view: Generate an interactive Cytoscape.js corridor visualization and edge severance simulation.
+- netreach serve: Launch headless REST API daemon for SIEM/SOAR and enterprise platform integration.
 - netreach benchmark: Run automated latency, parameter audit, and accuracy benchmarks.
 """
 
+import os
 import sys
 import json
 import argparse
@@ -26,7 +29,7 @@ console = Console()
 def print_banner():
     banner = Text()
     banner.append("⚡ NetReach ", style="bold cyan")
-    banner.append("v0.6.0 — Enterprise Neural Attack Path & Remediation Engine\n", style="bold white")
+    banner.append("v0.7.0 — Enterprise Neural Attack Path & Remediation Engine\n", style="bold white")
     banner.append("Powered by Bidirectional Recurrent Latent Scaling (38M Params, INT8 Optimized)", style="dim")
     console.print(Panel(banner, border_style="cyan"))
 
@@ -390,6 +393,70 @@ def cmd_harden(args):
         console.print(f"\n[bold green]✔ Detailed remediation report exported to '{args.export}'[/bold green]\n")
 
 
+def cmd_view(args):
+    """Generate an interactive HTML/JavaScript graph visualization of the corridor and chokepoints."""
+    print_banner()
+
+    try:
+        with console.status("[bold green]Loading neural reachability engine (v4 38M)..."):
+            engine = NetReachEngine(
+                checkpoint_path=args.checkpoint,
+                device=args.device,
+                use_int8=args.int8,
+            )
+        with console.status(f"[bold yellow]Analyzing attack corridor & chokepoints between '{args.src}' and '{args.dst}'..."):
+            harden_res = engine.harden(
+                graph_source=args.graph,
+                source=args.src,
+                target=args.dst,
+                top_k=args.top_k,
+                steps=args.depth,
+            )
+
+        from netreach.adapters.graph_loader import load_graph
+        graph = load_graph(args.graph)
+
+        from netreach.visualizer import generate_corridor_visualization
+        out_path = generate_corridor_visualization(
+            harden_result=harden_res,
+            graph=graph,
+            output_path=args.output,
+        )
+
+        console.print(f"\n[bold green]✔ Interactive corridor visualization generated:[/bold green] [bold cyan]{out_path}[/bold cyan]")
+        console.print(f"[dim]Open this file in any web browser to explore interactive node traversal and real-time edge severance simulations.[/dim]\n")
+
+        if args.open:
+            import webbrowser
+            webbrowser.open(f"file://{os.path.abspath(out_path)}")
+
+    except Exception as e:
+        console.print(f"[bold red]Visualization Error:[/bold red] {e}")
+        sys.exit(1)
+
+
+def cmd_serve(args):
+    """Launch NetReach REST API daemon."""
+    print_banner()
+    try:
+        from netreach.server import run_server
+        console.print(f"[bold green]Starting NetReach REST API Daemon on [cyan]http://{args.host}:{args.port}[/cyan]...[/bold green]")
+        console.print(f"[dim]Endpoints available: POST /api/v1/audit, POST /api/v1/harden, GET /api/v1/health[/dim]\n")
+        run_server(
+            host=args.host,
+            port=args.port,
+            checkpoint_path=args.checkpoint,
+            device=args.device,
+            use_int8=args.int8,
+        )
+    except ImportError as e:
+        console.print(f"[bold red]Dependency Error:[/bold red] {e}")
+        sys.exit(1)
+    except Exception as e:
+        console.print(f"[bold red]Server Error:[/bold red] {e}")
+        sys.exit(1)
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="netreach",
@@ -421,6 +488,27 @@ def main():
     harden_parser.add_argument("--int8", action="store_true", help="Enable dynamic INT8 quantization for fast CPU inference.")
     harden_parser.add_argument("--json", action="store_true", help="Output raw JSON results.")
 
+    # 'view' command
+    view_parser = subparsers.add_parser("view", help="Generate an interactive HTML/JavaScript graph visualization.")
+    view_parser.add_argument("--graph", "-g", type=str, required=True, help="Path to graph file (JSON, GraphML, DOT).")
+    view_parser.add_argument("--src", "-s", type=str, required=True, help="Source entity (e.g., Workstation-01).")
+    view_parser.add_argument("--dst", "-d", type=str, required=True, help="Target entity (e.g., Domain-Controller).")
+    view_parser.add_argument("--output", "-o", type=str, default="corridor.html", help="Path to output HTML file.")
+    view_parser.add_argument("--depth", type=int, default=None, help="Recurrent evaluation steps T.")
+    view_parser.add_argument("--top-k", "-k", type=int, default=3, help="Number of highest-impact chokepoints to display.")
+    view_parser.add_argument("--device", type=str, default=None, help="Force device ('cpu' or 'cuda').")
+    view_parser.add_argument("--checkpoint", type=str, default=None, help="Custom weights file path.")
+    view_parser.add_argument("--int8", action="store_true", help="Enable dynamic INT8 quantization for fast CPU inference.")
+    view_parser.add_argument("--open", action="store_true", help="Open generated visualization directly in web browser.")
+
+    # 'serve' command
+    serve_parser = subparsers.add_parser("serve", help="Launch headless REST API daemon.")
+    serve_parser.add_argument("--host", type=str, default="127.0.0.1", help="Host interface to bind (default: 127.0.0.1).")
+    serve_parser.add_argument("--port", "-p", type=int, default=8080, help="Port to listen on (default: 8080).")
+    serve_parser.add_argument("--device", type=str, default=None, help="Force device ('cpu' or 'cuda').")
+    serve_parser.add_argument("--checkpoint", type=str, default=None, help="Custom weights file path.")
+    serve_parser.add_argument("--int8", action="store_true", help="Enable dynamic INT8 quantization for fast CPU inference.")
+
     # 'benchmark' command
     bench_parser = subparsers.add_parser("benchmark", help="Run latency and accuracy benchmark.")
     bench_parser.add_argument("--samples", type=int, default=16, help="Number of benchmark samples.")
@@ -435,6 +523,10 @@ def main():
         cmd_audit(args)
     elif args.command == "harden":
         cmd_harden(args)
+    elif args.command == "view":
+        cmd_view(args)
+    elif args.command == "serve":
+        cmd_serve(args)
     elif args.command == "benchmark":
         cmd_benchmark(args)
 

@@ -64,23 +64,43 @@ def load_graph(source: Union[str, nx.DiGraph, List[Dict[str, Any]], Dict[str, An
     if isinstance(source, list):
         # List of edge dicts: [{"source": "u", "target": "v", ...}]
         from netreach.adapters.bloodhound import parse_bloodhound_data
-        try:
-            return parse_bloodhound_data(source)
-        except Exception:
-            G = nx.DiGraph()
-            for item in source:
-                u = str(item.get("source") or item.get("src") or item.get("from"))
-                v = str(item.get("target") or item.get("dst") or item.get("to"))
-                attrs = {k: v for k, v in item.items() if k not in ("source", "src", "from", "target", "dst", "to")}
-                G.add_edge(u, v, **attrs)
-            return G
-
-    if isinstance(source, dict):
-        from netreach.adapters.bloodhound import parse_bloodhound_data
+        from netreach.adapters.cloud_iam import parse_cloud_iam_data
         try:
             G_bh = parse_bloodhound_data(source)
             if G_bh.number_of_nodes() > 0 or G_bh.number_of_edges() > 0:
                 return G_bh
+        except Exception:
+            pass
+
+        try:
+            G_cloud = parse_cloud_iam_data(source)
+            if G_cloud.number_of_nodes() > 0 or G_cloud.number_of_edges() > 0:
+                return G_cloud
+        except Exception:
+            pass
+
+        G = nx.DiGraph()
+        for item in source:
+            u = str(item.get("source") or item.get("src") or item.get("from"))
+            v = str(item.get("target") or item.get("dst") or item.get("to"))
+            attrs = {k: v for k, v in item.items() if k not in ("source", "src", "from", "target", "dst", "to")}
+            G.add_edge(u, v, **attrs)
+        return G
+
+    if isinstance(source, dict):
+        from netreach.adapters.bloodhound import parse_bloodhound_data
+        from netreach.adapters.cloud_iam import parse_cloud_iam_data
+        try:
+            G_bh = parse_bloodhound_data(source)
+            if G_bh.number_of_nodes() > 0 or G_bh.number_of_edges() > 0:
+                return G_bh
+        except Exception:
+            pass
+
+        try:
+            G_cloud = parse_cloud_iam_data(source)
+            if G_cloud.number_of_nodes() > 0 or G_cloud.number_of_edges() > 0:
+                return G_cloud
         except Exception:
             pass
 

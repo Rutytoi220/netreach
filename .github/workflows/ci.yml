@@ -30,7 +30,7 @@ jobs:
 
       - name: Install NetReach and dependencies
         run: |
-          pip install -e .[dev]
+          pip install -e .[api,dev]
 
       - name: Run Test Suite
         run: |
@@ -44,6 +44,15 @@ jobs:
         run: |
           netreach harden --graph examples/bloodhound_enterprise.json --src "WORKSTATION-01.CORP.LOCAL" --dst "DC01.CORP.LOCAL" --int8 --export ci_remediation_report.md
           test -f ci_remediation_report.md
+
+      - name: Run CLI Visualizer Verification
+        run: |
+          netreach view --graph examples/bloodhound_enterprise.json --src "WORKSTATION-01.CORP.LOCAL" --dst "DC01.CORP.LOCAL" --depth 6 --top-k 2 --output ci_corridor.html --int8
+          test -f ci_corridor.html
+
+      - name: Run CLI Hybrid Cloud IAM Verification
+        run: |
+          netreach audit --graph examples/hybrid_cloud_iam.json --src "WORKSTATION-01.CORP.LOCAL" --dst "arn:aws:iam::aws:policy/AdministratorAccess" --int8
 
       - name: Run CLI Benchmark Verification
         run: |

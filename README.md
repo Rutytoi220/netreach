@@ -1,16 +1,51 @@
-# NetReach ⚡ v0.6.0: Enterprise Neural Attack Path & Remediation Engine
+# NetReach ⚡ v0.7.0: Interactive Graph Visualizer, Hybrid Cloud IAM & REST API
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.2%2B-ee4c2c.svg)](https://pytorch.org/)
 [![Parameters](https://img.shields.io/badge/Parameters-38.04M-brightgreen.svg)](#parameter-budget)
-[![Tests](https://img.shields.io/badge/Tests-50%2F50%20Passing-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/Tests-61%2F61%20Passing-brightgreen.svg)](tests/)
 
-**NetReach v0.6.0** is an enterprise neural graph engine for deep attack path reachability, multi-relational network path reasoning, and **Automated Chokepoint Remediation (`netreach harden`)**. NetReach v0.6.0 breaks through the 32-hop barrier on massive enterprise topologies ($N = 256, M = 768, H \le 40$) using **Momentum Wavefront Recurrence**, **Collision Peak Halting**, **Pointer Beam Search**, and **Fast Neural Edge Ablation**.
+**NetReach v0.7.0** is an enterprise neural graph engine for deep lateral movement analysis, multi-tenant cloud privilege escalation reasoning, and defensive attack path mitigation. NetReach v0.7.0 introduces **Interactive Cytoscape.js Corridor Visualization (`netreach view`)**, **Hybrid Cloud IAM Ingestion (AWS IAM & Azure / Entra ID)**, and a **Lightweight Headless REST API Daemon (`netreach serve`)**.
 
 ---
 
-## What's New in NetReach v0.6.0: Automated Chokepoint Remediation (`netreach harden`)
+## What's New in NetReach v0.7.0
+
+### 1. Interactive Standalone Visualizer (`netreach view`)
+Generate self-contained, interactive HTML/JS graph visualizations powered by Cytoscape.js:
+- **Color-Coded Nodes:** Distinct visual roles for Compromised Source (Red), Crown Jewel (Gold), Collision Bridge $v^*$ (Glowing Cyan), Attack Path (Purple), and Corridor Context (Slate).
+- **Directed Relation Badges:** Real-world Active Directory and Cloud IAM relationship indicators (`AdminTo`, `HasSession`, `AssumeRole`, `AZRoleAssignment`).
+- **Interactive Edge Severance Simulation:** Click any critical chokepoint or the "Sever Edge" toggle in the sidebar to simulate severing the permission in real time, dynamically collapsing the live reachability meter from $>90\%$ down to $<1\%$.
+
+```bash
+netreach view \
+  --graph examples/hybrid_cloud_iam.json \
+  --src "WORKSTATION-01.CORP.LOCAL" \
+  --dst "arn:aws:iam::aws:policy/AdministratorAccess" \
+  --output corridor.html
+```
+
+### 2. Hybrid Cloud & Multi-Tenant IAM Ingestion (`netreach/adapters/cloud_iam.py`)
+Seamlessly model complex hybrid multi-cloud privilege escalation paths bridging on-prem Active Directory and modern cloud identity providers:
+- **AWS IAM Primitives:** `AssumeRole`, `PassRole`, `AttachedPolicy`, `FederateTo`, `InstanceProfile`.
+- **Azure / Microsoft Entra ID:** `AZRoleAssignment`, `AZAppAdmin`, `AZOwns`, `AZAddMembers`, `AZGlobalAdmin`, `DirSync`.
+- **Automated Cloud Mitigations:** Generates `aws iam update-assume-role-policy`, `aws iam detach-role-policy`, and `az role assignment delete` remediation scripts.
+
+### 3. Lightweight REST API Server (`netreach serve`)
+Run a headless FastAPI / Uvicorn daemon for direct integration with SIEM, SOAR, and cloud security platforms:
+- `POST /api/v1/audit`: Ingest graph structures and compute neural reachability, ACT steps, and attack paths.
+- `POST /api/v1/harden`: Execute fast neural edge ablation to return ranked chokepoints and remediation commands.
+- `GET /api/v1/health`: Query model parameter budget, inference device, and quantization state.
+
+```bash
+# Launch API daemon
+netreach serve --host 127.0.0.1 --port 8080
+```
+
+---
+
+## Automated Chokepoint Remediation (`netreach harden`)
 
 Attack path discovery is only half the battle; security engineering teams need to know **which single permission or credential to revoke to break the attack chain** with minimal disruption to operations.
 
@@ -181,7 +216,25 @@ netreach harden \
 netreach harden --graph examples/bloodhound_enterprise.json --src "WORKSTATION-01.CORP.LOCAL" --dst "DC01.CORP.LOCAL" --json
 ```
 
-### 3. `netreach benchmark`
+### 3. `netreach view`
+Generate an interactive, standalone Cytoscape.js corridor visualization and edge severance simulation:
+```bash
+# Export self-contained HTML corridor visualizer
+netreach view \
+  --graph examples/hybrid_cloud_iam.json \
+  --src "WORKSTATION-01.CORP.LOCAL" \
+  --dst "arn:aws:iam::aws:policy/AdministratorAccess" \
+  --output corridor.html
+```
+
+### 4. `netreach serve`
+Launch the headless REST API daemon for SIEM/SOAR automation:
+```bash
+# Start API daemon
+netreach serve --host 127.0.0.1 --port 8080
+```
+
+### 5. `netreach benchmark`
 Run automated compute latency, parameter audit, and multi-hop accuracy benchmarks:
 ```bash
 netreach benchmark --samples 16

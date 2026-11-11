@@ -1,0 +1,84 @@
+{
+  "meta": {
+    "version": 1,
+    "type": "hybrid_cloud_iam",
+    "description": "Multi-Tenant Hybrid Cloud Attack Path: On-Prem Active Directory -> Microsoft Entra Connect -> Azure App Registration -> AWS IAM AssumeRole -> Cloud Crown Jewel"
+  },
+  "nodes": [
+    {"id": "WORKSTATION-01.CORP.LOCAL", "type": "Computer", "environment": "on-prem"},
+    {"id": "DEV-USER@CORP.LOCAL", "type": "User", "environment": "on-prem"},
+    {"id": "DEVOPS-ENGINEERS@CORP.LOCAL", "type": "Group", "environment": "on-prem"},
+    {"id": "SRV-ENTRACONNECT.CORP.LOCAL", "type": "Computer", "environment": "on-prem"},
+    {"id": "MSOL_SyncAdmin@corp.onmicrosoft.com", "type": "CloudUser", "environment": "entra_id"},
+    {"id": "Entra-SSO-AWS-AppRegistration", "type": "AppRegistration", "environment": "entra_id"},
+    {"id": "arn:aws:iam::123456789012:saml-provider/EntraID", "type": "SAMLProvider", "environment": "aws"},
+    {"id": "arn:aws:iam::123456789012:role/AWS-DevOps-Pipeline-Role", "type": "Role", "environment": "aws"},
+    {"id": "arn:aws:iam::123456789012:role/AWS-Production-Cluster-Admin", "type": "Role", "environment": "aws"},
+    {"id": "arn:aws:iam::aws:policy/AdministratorAccess", "type": "Policy", "environment": "aws"}
+  ],
+  "edges": [
+    {
+      "source": "WORKSTATION-01.CORP.LOCAL",
+      "target": "DEV-USER@CORP.LOCAL",
+      "relation": "HasSession",
+      "cloud": "on-prem",
+      "description": "Attacker compromises initial workstation with cached developer credentials."
+    },
+    {
+      "source": "DEV-USER@CORP.LOCAL",
+      "target": "DEVOPS-ENGINEERS@CORP.LOCAL",
+      "relation": "MemberOf",
+      "cloud": "on-prem",
+      "description": "Developer is a member of the DevOps Engineers security group."
+    },
+    {
+      "source": "DEVOPS-ENGINEERS@CORP.LOCAL",
+      "target": "SRV-ENTRACONNECT.CORP.LOCAL",
+      "relation": "AdminTo",
+      "cloud": "on-prem",
+      "description": "DevOps Engineers group possesses local administrative access on Entra Connect server."
+    },
+    {
+      "source": "SRV-ENTRACONNECT.CORP.LOCAL",
+      "target": "MSOL_SyncAdmin@corp.onmicrosoft.com",
+      "relation": "AllowedToDelegate",
+      "cloud": "hybrid",
+      "description": "Entra Connect Sync service account credentials extracted from sync database."
+    },
+    {
+      "source": "MSOL_SyncAdmin@corp.onmicrosoft.com",
+      "target": "Entra-SSO-AWS-AppRegistration",
+      "relation": "AZAppAdmin",
+      "cloud": "entra_id",
+      "description": "Sync admin grants credentials to the enterprise AWS SSO App Registration."
+    },
+    {
+      "source": "Entra-SSO-AWS-AppRegistration",
+      "target": "arn:aws:iam::123456789012:saml-provider/EntraID",
+      "relation": "FederateTo",
+      "cloud": "aws",
+      "description": "Entra App Registration holds SAML federation trust with AWS IAM."
+    },
+    {
+      "source": "arn:aws:iam::123456789012:saml-provider/EntraID",
+      "target": "arn:aws:iam::123456789012:role/AWS-DevOps-Pipeline-Role",
+      "relation": "AssumeRole",
+      "cloud": "aws",
+      "description": "SAML federation trust policy allows assuming the AWS DevOps Pipeline Role."
+    },
+    {
+      "source": "arn:aws:iam::123456789012:role/AWS-DevOps-Pipeline-Role",
+      "target": "arn:aws:iam::123456789012:role/AWS-Production-Cluster-Admin",
+      "relation": "AssumeRole",
+      "cloud": "aws",
+      "description": "Pipeline role trust policy permits assuming Production Cluster Admin role."
+    },
+    {
+      "source": "arn:aws:iam::123456789012:role/AWS-Production-Cluster-Admin",
+      "target": "arn:aws:iam::aws:policy/AdministratorAccess",
+      "relation": "AttachedPolicy",
+      "cloud": "aws",
+      "description": "Production Cluster Admin role has full AWS AdministratorAccess policy attached."
+    }
+  ]
+}

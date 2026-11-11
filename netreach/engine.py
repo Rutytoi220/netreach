@@ -129,12 +129,13 @@ class NetReachEngine:
                 state_dict = ckpt.get("model_state_dict", ckpt)
                 self.model.load_state_dict(state_dict, strict=False)
 
+        self.param_count = getattr(self.model, "count_parameters", lambda: sum(p.numel() for p in self.model.parameters()))()
+
         # 3. Optional INT8 Dynamic Quantization for CPU
         if self.use_int8:
             self.model = quantize_model_for_cpu(self.model)
 
         self.model.eval()
-        self.param_count = getattr(self.model, "count_parameters", lambda: sum(p.numel() for p in self.model.parameters()))()
         self.use_bf16 = (self.device.type == "cuda" and torch.cuda.is_bf16_supported() and not self.use_int8)
 
     def audit(
