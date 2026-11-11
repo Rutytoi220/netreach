@@ -12,7 +12,7 @@ from netreach.model import ChallengerLatentNet
 
 def test_engine_init_cpu():
     """Verify NetReachEngine initializes with default weights on pure CPU."""
-    engine = NetReachEngine(device="cpu")
+    engine = NetReachEngine(device="cpu", model_version="v1")
     assert engine.device == torch.device("cpu")
     assert 400_000 <= engine.param_count <= 600_000
     assert engine.param_count == 501_793
@@ -41,7 +41,7 @@ def test_cosine_similarity_computation():
 
 def test_engine_audit_path():
     """Verify end-to-end audit on a synthetic linear path."""
-    engine = NetReachEngine(device="cpu")
+    engine = NetReachEngine(device="cpu", model_version="v1")
 
     G = nx.DiGraph()
     path = [f"asset_{i}" for i in range(8)]
@@ -63,7 +63,7 @@ def test_engine_audit_path():
 
 def test_engine_audit_unreachable():
     """Verify audit on completely disconnected nodes."""
-    engine = NetReachEngine(device="cpu")
+    engine = NetReachEngine(device="cpu", model_version="v1")
 
     G = nx.DiGraph()
     G.add_edge("node_a", "node_b")
@@ -77,7 +77,7 @@ def test_engine_audit_unreachable():
 
 def test_engine_benchmark_cpu():
     """Verify automated benchmark runner executes without errors."""
-    engine = NetReachEngine(device="cpu")
+    engine = NetReachEngine(device="cpu", model_version="v1")
     bench = engine.benchmark(num_samples=4, hops=(3, 5), depths=(5, 10))
     assert bench["tested_samples"] == 4
     assert "mean_latency_ms" in bench

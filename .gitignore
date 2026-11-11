@@ -22,8 +22,9 @@ results/
 *.pt.bak
 *.tmp
 
-# Un-ignore the bundled library weights asset
+# Un-ignore the bundled library weights assets
 !netreach/assets/weights.pt
+!netreach/assets/weights_v4.pt
 
 # IDE & OS
 .vscode/

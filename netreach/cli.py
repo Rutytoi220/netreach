@@ -1,8 +1,8 @@
 """
-Command-Line Interface for NetReach.
+Command-Line Interface for NetReach v0.5.0.
 
 Commands:
-- netreach audit: Audit lateral movement reachability across recurrent steps T.
+- netreach audit: Audit lateral movement reachability and neural path trace across recurrent steps T.
 - netreach benchmark: Run automated latency, parameter audit, and accuracy benchmarks.
 """
 
@@ -24,22 +24,26 @@ console = Console()
 def print_banner():
     banner = Text()
     banner.append("⚡ NetReach ", style="bold cyan")
-    banner.append("v0.1.0 — Neural Graph Attack Path & Lateral Movement Engine\n", style="bold white")
-    banner.append("Powered by Test-Time Recurrent Latent Scaling (501K Params)", style="dim")
+    banner.append("v0.5.0 — Enterprise Neural Attack Path & Lateral Movement Engine\n", style="bold white")
+    banner.append("Powered by Bidirectional Recurrent Latent Scaling (38M Params, INT8 Optimized)", style="dim")
     console.print(Panel(banner, border_style="cyan"))
 
 
 def cmd_audit(args):
-    """Execute attack path reachability audit."""
+    """Execute attack path reachability audit and neural path tracing."""
     if not args.json:
         print_banner()
 
-    depths = tuple(args.depth) if args.depth else (5, 10, 15, 20)
+    depths = tuple(args.depth) if args.depth else (4, 8, 12, 16)
 
     try:
         if not args.json:
-            with console.status("[bold green]Loading neural reachability engine..."):
-                engine = NetReachEngine(checkpoint_path=args.checkpoint, device=args.device)
+            with console.status("[bold green]Loading neural reachability engine (v4 38M)..."):
+                engine = NetReachEngine(
+                    checkpoint_path=args.checkpoint,
+                    device=args.device,
+                    use_int8=args.int8,
+                )
             with console.status(f"[bold yellow]Extracting attack corridor from '{args.src}' to '{args.dst}'..."):
                 result = engine.audit(
                     graph_source=args.graph,
@@ -48,7 +52,11 @@ def cmd_audit(args):
                     depths=depths,
                 )
         else:
-            engine = NetReachEngine(checkpoint_path=args.checkpoint, device=args.device)
+            engine = NetReachEngine(
+                checkpoint_path=args.checkpoint,
+                device=args.device,
+                use_int8=args.int8,
+            )
             result = engine.audit(
                 graph_source=args.graph,
                 source=args.src,
@@ -72,6 +80,12 @@ def cmd_audit(args):
             "subgraph_nodes": result.subgraph_nodes,
             "subgraph_edges": result.subgraph_edges,
             "oversmoothed": result.oversmoothed,
+            "bridge_node": result.bridge_node,
+            "neural_path": result.neural_path,
+            "path_relations": result.path_relations,
+            "is_valid_walk": result.is_valid_walk,
+            "act_steps": round(result.act_steps, 2),
+            "peak_collision": round(result.peak_collision, 4),
         }
         print(json.dumps(data, indent=2))
         return
@@ -79,9 +93,22 @@ def cmd_audit(args):
     # Visual Rich Presentation
     console.print(f"\n[bold white]Source Asset:[/bold white] [bold cyan]{result.source}[/bold cyan]")
     console.print(f"[bold white]Target Asset:[/bold white] [bold red]{result.target}[/bold red]")
+    mode_str = f"INT8 Quantized CPU" if engine.use_int8 else f"{engine.device}"
     console.print(
         f"[dim]Corridor Subgraph: {result.subgraph_nodes} nodes, {result.subgraph_edges} edges | "
-        f"Inference Latency: {result.inference_latency_ms:.2f} ms ({engine.device})[/dim]\n"
+        f"Latency: {result.inference_latency_ms:.2f} ms ({mode_str}, {engine.param_count:,} params)[/dim]\n"
+    )
+
+    # Collision Peak & Halting Telemetry
+    if result.bridge_node is not None:
+        console.print(
+            f"[bold white]Collision Bridge Node ($v^*$):[/bold white] [bold magenta]{result.bridge_node}[/bold magenta]"
+        )
+    valid_walk_str = "[bold green]VALID[/bold green]" if result.is_valid_walk else "[bold yellow]DISCONTINUOUS[/bold yellow]"
+    console.print(
+        f"[bold white]ACT Telemetry:[/bold white] Halting Steps = [bold cyan]{result.act_steps:.1f}[/bold cyan] | "
+        f"Peak Collision Affinity = [bold cyan]{result.peak_collision:.3f}[/bold cyan] | "
+        f"Beam Walk: {valid_walk_str}\n"
     )
 
     table = Table(
@@ -115,31 +142,45 @@ def cmd_audit(args):
 
     console.print(table)
 
-    # Lateral movement corridor summary
-    if result.ground_truth_path:
-        path_str = " [bold red]→[/bold red] ".join([f"[cyan]{node}[/cyan]" for node in result.ground_truth_path])
-        console.print(f"\n[bold yellow]Discovered Attack Chain ({result.shortest_hop_count} hops):[/bold yellow]")
+    # Reconstructed Attack Path step-by-step
+    if result.path_relations:
+        console.print(f"\n[bold yellow]Reconstructed Attack Chain ({len(result.path_relations)} hops):[/bold yellow]")
+        for idx, step in enumerate(result.path_relations, 1):
+            u = step["source"]
+            v = step["target"]
+            ad_rel = step.get("ad_relation", step.get("relation", "AdminTo"))
+            canon_rel = step.get("relation", "AdminTo")
+            rel_label = f"{canon_rel} [{ad_rel}]" if ad_rel != canon_rel else canon_rel
+            console.print(f"  [dim]{idx:2d}.[/dim] [bold cyan][{u}][/bold cyan] ──([bold yellow]{rel_label}[/bold yellow])──► [bold red][{v}][/bold red]")
+        console.print()
+    elif result.neural_path and len(result.neural_path) > 1:
+        path_str = " [bold red]──►[/bold red] ".join([f"[cyan][{node}][/cyan]" for node in result.neural_path])
+        console.print(f"\n[bold yellow]Neural Attack Path ({len(result.neural_path) - 1} hops):[/bold yellow]")
+        console.print(f"  {path_str}\n")
+    elif result.ground_truth_path:
+        path_str = " [bold red]──►[/bold red] ".join([f"[cyan][{node}][/cyan]" for node in result.ground_truth_path])
+        console.print(f"\n[bold yellow]Discovered Graph Path ({result.shortest_hop_count} hops):[/bold yellow]")
         console.print(f"  {path_str}\n")
     else:
-        console.print(f"\n[bold green]No direct attack chain found in graph corridor.[/bold green]\n")
+        console.print(f"\n[bold green]No attack chain identified between specified endpoints.[/bold green]\n")
 
     # Risk Summary Alert Box
     panel_title = f"RISK ASSESSMENT: {result.risk_level}"
     if result.risk_level == "CRITICAL":
         alert_body = (
-            f"[bold red]ALERT:[/bold red] Deep attack path detected with high confidence ({result.probabilities[depths[-1]]*100:.1f}%).\n"
-            f"Adversary possessing '{result.source}' can achieve multi-hop lateral movement to compromise '{result.target}'."
+            f"[bold red]CRITICAL EXPOSURE:[/bold red] Exploitable multi-hop lateral movement chain identified ({result.probabilities[depths[-1]]*100:.1f}%).\n"
+            f"Adversary compromising '{result.source}' can pivot through intermediate assets to compromise '{result.target}'."
         )
         panel_color = "red"
     elif result.risk_level == "HIGH":
         alert_body = (
-            f"[bold yellow]WARNING:[/bold yellow] Probable lateral movement corridor identified ({result.probabilities[depths[-1]]*100:.1f}%).\n"
+            f"[bold yellow]HIGH RISK:[/bold yellow] Probable lateral movement corridor identified ({result.probabilities[depths[-1]]*100:.1f}%).\n"
             f"Review intermediate privilege escalation and administrative delegation relationships."
         )
         panel_color = "yellow"
     else:
         alert_body = (
-            f"[bold green]SECURE:[/bold green] No viable lateral movement chain identified ({result.probabilities[depths[-1]]*100:.1f}%).\n"
+            f"[bold green]SEGMENTED:[/bold green] No viable lateral movement chain identified ({result.probabilities[depths[-1]]*100:.1f}%).\n"
             f"Target appears segmented from source position."
         )
         panel_color = "green"
@@ -152,12 +193,21 @@ def cmd_benchmark(args):
     if not args.json:
         print_banner()
         console.print("[bold cyan]Initializing NetReach Benchmark Suite...[/bold cyan]")
-        engine = NetReachEngine(checkpoint_path=args.checkpoint, device=args.device)
-        console.print(f"[dim]Device: {engine.device} | Parameter Budget: {engine.param_count:,} params[/dim]")
+        engine = NetReachEngine(
+            checkpoint_path=args.checkpoint,
+            device=args.device,
+            use_int8=args.int8,
+        )
+        mode_str = "INT8 CPU" if engine.use_int8 else str(engine.device)
+        console.print(f"[dim]Device: {mode_str} | Parameter Budget: {engine.param_count:,} params[/dim]")
         with console.status(f"[bold yellow]Executing {args.samples} reachability samples across depths..."):
             bench = engine.benchmark(num_samples=args.samples)
     else:
-        engine = NetReachEngine(checkpoint_path=args.checkpoint, device=args.device)
+        engine = NetReachEngine(
+            checkpoint_path=args.checkpoint,
+            device=args.device,
+            use_int8=args.int8,
+        )
         bench = engine.benchmark(num_samples=args.samples)
 
     if args.json:
@@ -171,23 +221,28 @@ def cmd_benchmark(args):
     metric_table.add_column("Value", style="bold green", justify="right")
 
     metric_table.add_row("Compute Device", bench["device"])
-    metric_table.add_row("Total Parameters", f"{bench['parameter_count']:,} (Matched ~501K)")
+    metric_table.add_row("Total Parameters", f"{bench['parameter_count']:,}")
     metric_table.add_row("Mean Latency", f"{bench['mean_latency_ms']} ms / sample")
     metric_table.add_row("P95 Latency", f"{bench['latency_p95_ms']} ms")
     metric_table.add_row("Evaluation Samples", str(bench["tested_samples"]))
     console.print(metric_table)
 
     console.print("\n")
-    acc_table = Table(title="Accuracy vs. Hop Length (H) Across Recurrent Depths (T)", header_style="bold magenta")
-    acc_table.add_column("Hops (H)", justify="center", style="cyan")
-    for t_step in [5, 10, 15, 20]:
-        acc_table.add_column(f"T={t_step}", justify="center", style="yellow")
+    acc_summary = bench.get("accuracy_summary", {})
+    if acc_summary:
+        first_hop = next(iter(acc_summary.values()))
+        depth_keys = sorted(first_hop.keys(), key=lambda x: int(x.replace("T=", "")))
 
-    for hop_key, depth_accs in bench["accuracy_summary"].items():
-        row_vals = [f"{depth_accs.get(f'T={t}', 0.0)*100:.1f}%" for t in [5, 10, 15, 20]]
-        acc_table.add_row(hop_key, *row_vals)
+        acc_table = Table(title="Accuracy vs. Hop Length (H) Across Recurrent Depths (T)", header_style="bold magenta")
+        acc_table.add_column("Hops (H)", justify="center", style="cyan")
+        for d_key in depth_keys:
+            acc_table.add_column(d_key, justify="center", style="yellow")
 
-    console.print(acc_table)
+        for hop_key, depth_accs in acc_summary.items():
+            row_vals = [f"{depth_accs.get(d, 0.0)*100:.1f}%" for d in depth_keys]
+            acc_table.add_row(hop_key, *row_vals)
+
+        console.print(acc_table)
     console.print("\n[bold green]✔ Benchmark completed successfully.[/bold green]\n")
 
 
@@ -203,16 +258,18 @@ def main():
     audit_parser.add_argument("--graph", "-g", type=str, required=True, help="Path to graph file (JSON, GraphML, DOT).")
     audit_parser.add_argument("--src", "-s", type=str, required=True, help="Source entity (e.g., Workstation-01).")
     audit_parser.add_argument("--dst", "-d", type=str, required=True, help="Target entity (e.g., Domain-Controller).")
-    audit_parser.add_argument("--depth", type=int, nargs="+", default=[5, 10, 15, 20], help="Recurrent test steps T.")
+    audit_parser.add_argument("--depth", type=int, nargs="+", default=[4, 8, 12, 16], help="Recurrent test steps T.")
     audit_parser.add_argument("--device", type=str, default=None, help="Force device ('cpu' or 'cuda').")
     audit_parser.add_argument("--checkpoint", type=str, default=None, help="Custom weights file path.")
+    audit_parser.add_argument("--int8", action="store_true", help="Enable dynamic INT8 quantization for fast CPU inference.")
     audit_parser.add_argument("--json", action="store_true", help="Output raw JSON results.")
 
     # 'benchmark' command
     bench_parser = subparsers.add_parser("benchmark", help="Run latency and accuracy benchmark.")
-    bench_parser.add_argument("--samples", type=int, default=50, help="Number of benchmark samples.")
+    bench_parser.add_argument("--samples", type=int, default=16, help="Number of benchmark samples.")
     bench_parser.add_argument("--device", type=str, default=None, help="Force device ('cpu' or 'cuda').")
     bench_parser.add_argument("--checkpoint", type=str, default=None, help="Custom weights file path.")
+    bench_parser.add_argument("--int8", action="store_true", help="Enable dynamic INT8 quantization for fast CPU inference.")
     bench_parser.add_argument("--json", action="store_true", help="Output raw JSON results.")
 
     args = parser.parse_args()

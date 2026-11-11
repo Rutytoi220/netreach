@@ -1,0 +1,206 @@
+{
+  "meta": {
+    "methods": 15,
+    "type": "bloodhound_enterprise_export",
+    "count": 14,
+    "version": 5
+  },
+  "data": [
+    {
+      "Properties": {
+        "name": "WORKSTATION-01.CORP.LOCAL",
+        "distinguishedname": "CN=WORKSTATION-01,OU=Workstations,DC=CORP,DC=LOCAL",
+        "operatingsystem": "Windows 11 Enterprise",
+        "enabled": true
+      },
+      "Sessions": [
+        {
+          "ComputerName": "WORKSTATION-01.CORP.LOCAL",
+          "UserName": "BOB.DEV@CORP.LOCAL",
+          "Weight": 2
+        }
+      ],
+      "Aces": []
+    },
+    {
+      "Properties": {
+        "name": "BOB.DEV@CORP.LOCAL",
+        "distinguishedname": "CN=Bob Dev,OU=Engineering,DC=CORP,DC=LOCAL",
+        "title": "Junior Software Engineer",
+        "enabled": true
+      },
+      "Sessions": [],
+      "Aces": []
+    },
+    {
+      "Properties": {
+        "name": "HELPDESK-SUPPORT@CORP.LOCAL",
+        "distinguishedname": "CN=Helpdesk-Support,OU=Groups,DC=CORP,DC=LOCAL",
+        "admincount": false
+      },
+      "Members": [
+        {
+          "name": "BOB.DEV@CORP.LOCAL",
+          "ObjectIdentifier": "S-1-5-21-1001"
+        }
+      ],
+      "Aces": []
+    },
+    {
+      "Properties": {
+        "name": "SRV-FILES.CORP.LOCAL",
+        "distinguishedname": "CN=SRV-FILES,OU=Servers,DC=CORP,DC=LOCAL",
+        "operatingsystem": "Windows Server 2022",
+        "enabled": true
+      },
+      "Sessions": [
+        {
+          "ComputerName": "SRV-FILES.CORP.LOCAL",
+          "UserName": "SVC-BACKUP@CORP.LOCAL",
+          "Weight": 1
+        }
+      ],
+      "Aces": [
+        {
+          "PrincipalName": "HELPDESK-SUPPORT@CORP.LOCAL",
+          "RightName": "CanRDP",
+          "IsInherited": false
+        }
+      ]
+    },
+    {
+      "Properties": {
+        "name": "SVC-BACKUP@CORP.LOCAL",
+        "distinguishedname": "CN=svc-backup,OU=ServiceAccounts,DC=CORP,DC=LOCAL",
+        "serviceprincipalnames": ["MSSQLSvc/SRV-FILES.CORP.LOCAL"],
+        "enabled": true
+      },
+      "Sessions": [],
+      "Aces": []
+    },
+    {
+      "Properties": {
+        "name": "TIER1-ADMINS@CORP.LOCAL",
+        "distinguishedname": "CN=Tier1-Admins,OU=Groups,DC=CORP,DC=LOCAL",
+        "admincount": true
+      },
+      "Members": [
+        {
+          "name": "SVC-BACKUP@CORP.LOCAL",
+          "ObjectIdentifier": "S-1-5-21-2002"
+        }
+      ],
+      "Aces": []
+    },
+    {
+      "Properties": {
+        "name": "JUMPBOX-01.CORP.LOCAL",
+        "distinguishedname": "CN=JUMPBOX-01,OU=Management,DC=CORP,DC=LOCAL",
+        "operatingsystem": "Windows Server 2022 Datacenter",
+        "enabled": true
+      },
+      "Sessions": [
+        {
+          "ComputerName": "JUMPBOX-01.CORP.LOCAL",
+          "UserName": "ALICE.ADMIN@CORP.LOCAL",
+          "Weight": 3
+        }
+      ],
+      "Aces": [
+        {
+          "PrincipalName": "TIER1-ADMINS@CORP.LOCAL",
+          "RightName": "AdminTo",
+          "IsInherited": false
+        }
+      ]
+    },
+    {
+      "Properties": {
+        "name": "ALICE.ADMIN@CORP.LOCAL",
+        "distinguishedname": "CN=Alice Admin,OU=Tier0,DC=CORP,DC=LOCAL",
+        "admincount": true,
+        "enabled": true
+      },
+      "Sessions": [],
+      "Aces": []
+    },
+    {
+      "Properties": {
+        "name": "DOMAIN-ADMINS@CORP.LOCAL",
+        "distinguishedname": "CN=Domain Admins,CN=Users,DC=CORP,DC=LOCAL",
+        "admincount": true
+      },
+      "Members": [
+        {
+          "name": "ALICE.ADMIN@CORP.LOCAL",
+          "ObjectIdentifier": "S-1-5-21-500"
+        }
+      ],
+      "Aces": []
+    },
+    {
+      "Properties": {
+        "name": "DC01.CORP.LOCAL",
+        "distinguishedname": "CN=DC01,OU=Domain Controllers,DC=CORP,DC=LOCAL",
+        "operatingsystem": "Windows Server 2025",
+        "enabled": true
+      },
+      "Sessions": [],
+      "Aces": [
+        {
+          "PrincipalName": "DOMAIN-ADMINS@CORP.LOCAL",
+          "RightName": "GenericAll",
+          "IsInherited": false
+        }
+      ]
+    },
+    {
+      "Properties": {
+        "name": "CONTRACTOR-LAPTOP.CORP.LOCAL",
+        "distinguishedname": "CN=CONTRACTOR-LAPTOP,OU=External,DC=CORP,DC=LOCAL",
+        "operatingsystem": "Windows 10 Enterprise"
+      },
+      "Sessions": [
+        {
+          "ComputerName": "CONTRACTOR-LAPTOP.CORP.LOCAL",
+          "UserName": "CHARLIE.TEMP@CORP.LOCAL"
+        }
+      ],
+      "Aces": []
+    },
+    {
+      "Properties": {
+        "name": "CHARLIE.TEMP@CORP.LOCAL",
+        "distinguishedname": "CN=Charlie Temp,OU=External,DC=CORP,DC=LOCAL"
+      },
+      "Sessions": [],
+      "Aces": []
+    },
+    {
+      "Properties": {
+        "name": "PRINT-SERVER.CORP.LOCAL",
+        "distinguishedname": "CN=PRINT-SERVER,OU=Printers,DC=CORP,DC=LOCAL"
+      },
+      "Sessions": [],
+      "Aces": [
+        {
+          "PrincipalName": "CHARLIE.TEMP@CORP.LOCAL",
+          "RightName": "OpenPort"
+        }
+      ]
+    },
+    {
+      "Properties": {
+        "name": "GUEST-WIFI.CORP.LOCAL",
+        "distinguishedname": "CN=GUEST-WIFI,OU=Network,DC=CORP,DC=LOCAL"
+      },
+      "Sessions": [],
+      "Aces": [
+        {
+          "PrincipalName": "PRINT-SERVER.CORP.LOCAL",
+          "RightName": "SubnetRoute"
+        }
+      ]
+    }
+  ]
+}

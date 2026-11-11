@@ -6,18 +6,20 @@ from massive enterprise security graphs (e.g., Active Directory / BloodHound) an
 it into aligned tensor batches for ChallengerLatentNet with distribution density matching.
 """
 
-from typing import Tuple, Dict, Any, Optional, Set
+from typing import Tuple, Dict, Any, Optional, Set, List
 import random
 import networkx as nx
 import torch
+
+from netreach.model_v4 import RELATION_TO_ID
 
 
 def extract_subgraph(
     G: nx.DiGraph,
     source: str,
     target: str,
-    max_nodes: int = 48,
-    max_edges: int = 96,
+    max_nodes: int = 256,
+    max_edges: int = 768,
     k_hops: int = 20,
 ) -> Tuple[nx.DiGraph, Dict[str, Any]]:
     """
@@ -106,13 +108,13 @@ def prepare_graph_batch(
     source: str,
     target: str,
     device: torch.device,
-    target_nodes: int = 48,
-    target_edges: int = 96,
+    target_nodes: int = 256,
+    target_edges: int = 768,
     seed: int = 42,
-) -> Dict[str, torch.Tensor]:
+) -> Dict[str, Any]:
     """
-    Format an extracted NetworkX sub-graph into batched tensors aligned with ChallengerLatentNet.
-    Uses density-matched distractor augmentation to preserve invariant message passing.
+    Format an extracted NetworkX sub-graph into batched tensors aligned with ChallengerLatentNetV4.
+    Encodes relational edge categories and preserves directional Active Directory relationships.
     """
     sub_nodes = list(subG.nodes())
     if source not in sub_nodes or target not in sub_nodes:
@@ -125,8 +127,8 @@ def prepare_graph_batch(
 
     fullG = nx.DiGraph()
     fullG.add_nodes_from(all_nodes)
-    for u, v in subG.edges():
-        fullG.add_edge(u, v)
+    for u, v, data in subG.edges(data=True):
+        fullG.add_edge(u, v, **data)
 
     # Detect current shortest path length if any
     try:
@@ -134,20 +136,29 @@ def prepare_graph_batch(
     except nx.NetworkXNoPath:
         H_curr = None
 
-    # Density matching: augment with candidate edges without creating illegal shortcuts
-    candidates = [
-        (u, v)
-        for u in all_nodes
-        for v in all_nodes
-        if u != v and not fullG.has_edge(u, v)
-    ]
+    # Density matching: augment with candidate edges strictly among distractor nodes
+    # so we never alter the topological paths or connectivity between real nodes
+    if distractor_nodes:
+        candidates = [
+            (u, v)
+            for u in distractor_nodes
+            for v in distractor_nodes
+            if u != v and not fullG.has_edge(u, v)
+        ]
+    else:
+        candidates = [
+            (u, v)
+            for u in all_nodes
+            for v in all_nodes
+            if u != v and not fullG.has_edge(u, v)
+        ]
     rng = random.Random(seed)
     rng.shuffle(candidates)
 
     for u, v in candidates:
         if fullG.number_of_edges() >= target_edges:
             break
-        fullG.add_edge(u, v)
+        fullG.add_edge(u, v, relation="SubnetRoute")
         if H_curr is not None:
             try:
                 spl = nx.shortest_path_length(fullG, source, target)
@@ -173,12 +184,15 @@ def prepare_graph_batch(
     adj = torch.zeros(B, N, N, dtype=torch.float32, device=device)
     edge_src = torch.zeros(B, M, dtype=torch.long, device=device)
     edge_dst = torch.zeros(B, M, dtype=torch.long, device=device)
+    edge_rel = torch.zeros(B, M, dtype=torch.long, device=device)
 
-    for k, (u, v) in enumerate(fullG.edges()):
+    for k, (u, v, data) in enumerate(fullG.edges(data=True)):
         if k < M:
             adj[0, node_map[u], node_map[v]] = 1.0
             edge_src[0, k] = node_map[u]
             edge_dst[0, k] = node_map[v]
+            rel_name = data.get("relation", "AdminTo")
+            edge_rel[0, k] = RELATION_TO_ID.get(rel_name, 0)
 
     # If still below target_edges, pad remaining with self-loops on distractor nodes
     for k in range(fullG.number_of_edges(), M):
@@ -186,6 +200,7 @@ def prepare_graph_batch(
         adj[0, d_idx, d_idx] = 1.0
         edge_src[0, k] = d_idx
         edge_dst[0, k] = d_idx
+        edge_rel[0, k] = RELATION_TO_ID.get("SubnetRoute", 5)
 
     return {
         "node_ids": node_ids,
@@ -193,6 +208,10 @@ def prepare_graph_batch(
         "adj": adj,
         "edge_src": edge_src,
         "edge_dst": edge_dst,
+        "edge_rel": edge_rel,
         "src_idx": torch.tensor([0], dtype=torch.long, device=device),
         "dst_idx": torch.tensor([1], dtype=torch.long, device=device),
+        "node_names": all_nodes,
+        "node_map": node_map,
+        "fullG": fullG,
     }

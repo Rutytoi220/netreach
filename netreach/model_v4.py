@@ -21,6 +21,7 @@ Architectural Specs:
     Reconstructs the full sequence of hostnames starting from the bridge node v* = argmax_v C(v).
 """
 
+import sys
 from typing import Dict, List, Optional, Tuple, Union, Any
 import networkx as nx
 import torch
@@ -243,7 +244,7 @@ class ChallengerLatentNetV4(nn.Module):
         self.pointer_k = nn.Linear(d_model * 2, d_model)
 
         total_params = self.count_parameters()
-        print(f"[Init] ChallengerLatentNetV4 initialized with {total_params:,} parameters.")
+        print(f"[Init] ChallengerLatentNetV4 initialized with {total_params:,} parameters.", file=sys.stderr)
         assert (
             35_000_000 <= total_params <= 45_000_000
         ), f"Parameter count {total_params:,} violates [35.0M, 45.0M] budget constraint!"
@@ -525,7 +526,10 @@ class ChallengerLatentNetV4(nn.Module):
         anchored at the collision bridge node v* = argmax_v C(v).
         """
         self.eval()
-        single_batch = {k: v[sample_idx : sample_idx + 1] for k, v in batch.items()}
+        single_batch = {
+            k: (v[sample_idx : sample_idx + 1] if isinstance(v, torch.Tensor) else v)
+            for k, v in batch.items()
+        }
         out = self(single_batch, steps=max_steps, return_latents=True)
 
         reach_prob = torch.sigmoid(out["logit"][0]).item()

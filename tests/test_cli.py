@@ -72,7 +72,7 @@ def test_cli_benchmark_json(capsys, monkeypatch):
     captured = capsys.readouterr()
     bench = json.loads(captured.out)
     assert bench["tested_samples"] == 4
-    assert bench["parameter_count"] == 501_793
+    assert bench["parameter_count"] in (501_793, 38_041_604)
     assert "mean_latency_ms" in bench
 
 
